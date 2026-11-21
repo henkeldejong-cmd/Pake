@@ -1,0 +1,37 @@
+name: Build My Custom YouTube App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "youtube-plugin.js"
+      - ".github/workflows/build-youtube.yml"
+  workflow_dispatch:
+
+jobs:
+  build-youtube-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Setup Pake environment
+        uses: ./.github/actions/setup-env
+        with:
+          mode: build
+
+      - name: Build Pake CLI
+        run: pnpm run cli:build
+
+      - name: Build Custom YouTube MSI
+        run: |
+          node dist/cli.js https://www.youtube.com --name "YouTube" --width 1200 --height 800 --inject ./youtube-plugin.js
+
+      - name: Upload YouTube MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-youtube-msi
+          path: "*.msi"
+          if-no-files-found: error
