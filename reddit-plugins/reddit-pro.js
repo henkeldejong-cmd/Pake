@@ -1,5 +1,43 @@
+// ==UserScript==
+// @name         Reddit Pro — Desktop App Edition
+// @namespace    https://reddit.com/
+// @version      2.3.4
+// @description  Adapted for desktop app wrappers and direct webview injection.
+// @author       You
+// @match        https://www.reddit.com/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @run-at       document-start
+// ==/UserScript==
+
 (function () {
   'use strict';
+
+  /* ====================
+     Desktop App GM_* Polyfills
+     ==================== */
+  if (typeof GM_getValue === 'undefined') {
+    window.GM_getValue = (k, d) => {
+      try {
+        const r = localStorage.getItem(k);
+        if (r === null) return d;
+        try { return JSON.parse(r); } catch(_) { return r; }
+      } catch(_) { return d; }
+    };
+  }
+
+  if (typeof GM_setValue === 'undefined') {
+    window.GM_setValue = (k, v) => {
+      try {
+        localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
+      } catch(_) {}
+    };
+  }
+
+  if (typeof GM_registerMenuCommand === 'undefined') {
+    window.GM_registerMenuCommand = () => {};
+  }
 
   /* ====================
      Configuration & Defaults
@@ -40,18 +78,6 @@
     hidePromotedPosts: false
   };
 
-  /* ====================
-     Live settings state
-     ----------------------------------------------------
-     IMPORTANT: everything in the script reads from this
-     single `settings` object. The old version used separate
-     `let` variables and then tried to update them via
-     `window[name] = value`, which silently created an
-     unrelated global instead of touching the real variable —
-     that's why changes only "took" after a page reload.
-     Now there is exactly one place a setting lives, and
-     exactly one function (`save`) that ever changes it.
-     ==================== */
   const settings = {};
   Object.keys(DEFAULTS).forEach((key) => {
     const raw = GM_getValue(STORAGE_KEYS[key], DEFAULTS[key]);
@@ -77,6 +103,10 @@
   function onBodyReady(fn) {
     if (document.body) return fn();
     window.addEventListener('DOMContentLoaded', fn, { once: true });
+    // Fallback if DOMContentLoaded already fired before script injection
+    if (document.readyState === 'interactive' || document.readyState === 'complete') {
+      fn();
+    }
   }
 
   function measureTextWidth(text, fontSizePx, fontFamilyStr) {
@@ -87,7 +117,7 @@
     span.style.fontSize = fontSizePx + 'px';
     span.style.fontFamily = fontFamilyStr;
     span.textContent = text;
-    document.body.appendChild(span);
+    (document.body || document.documentElement).appendChild(span);
     const w = span.offsetWidth;
     span.remove();
     return w;
@@ -105,10 +135,6 @@
       (document.head || document.documentElement).appendChild(style);
     }
 
-    // Video/promoted post hiding is handled in JS (see applyFeedFilters),
-    // because hiding just the <shreddit-post> tag via CSS leaves its outer
-    // wrapper div (which carries its own border/padding) behind as an empty
-    // sliver. Walking up to that wrapper and hiding it instead avoids that.
     style.textContent = `
       @import url('https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&family=Great+Vibes&family=Inter:wght@400;600;700&family=Josefin+Sans:wght@400;600;700&display=swap');
 
@@ -122,15 +148,7 @@
   }
 
   /* ====================
-     Feed filters (hide video / promoted posts)
-     ----------------------------------------------------
-     Reddit renders each post as <article data-post-id="...">, which
-     contains the <shreddit-post> plus sibling elements for that same post
-     (e.g. a related-community-recommendations loader), and is itself
-     bracketed by <hr> divider elements at the feed level. Hiding only the
-     inner <shreddit-post> left the <article> and its <hr> dividers behind
-     as the stray horizontal lines. We hide the whole <article> instead,
-     plus any adjacent empty <hr>/spacer siblings.
+     Feed filters
      ==================== */
   const HIDE_MARK_ATTR = 'data-rp-hidden-by-filter';
   const VIDEO_HOSTS = ['v.redd.it', 'youtube.com', 'youtu.be', 'vimeo.com', 'gfycat.com', 'redgifs.com', 'streamable.com', 'clips.twitch.tv'];
@@ -152,16 +170,9 @@
   }
 
   function getPostContainer(post) {
-    // Reddit wraps each post in <article data-post-id="..."> alongside
-    // sibling elements (e.g. a related-community-recommendations loader)
-    // that belong to the same post but aren't single-child-nested under it.
-    // The article itself is the true per-post unit, and it's reliably
-    // identifiable via data-post-id, so target it directly.
     const article = post.closest('article[data-post-id]') || post.closest('article');
     if (article) return article;
 
-    // Fallback for layouts without an <article> ancestor: climb through
-    // wrappers that exist solely to hold this one post.
     let el = post;
     let hops = 0;
     while (
@@ -179,9 +190,6 @@
   function isLikelyDivider(el) {
     if (!el || el.nodeType !== 1) return false;
     if (el.tagName === 'SHREDDIT-POST') return false;
-    // A real divider/spacer has no text and no interactive or media content —
-    // this keeps us from ever hiding a genuine widget that happens to sit
-    // next to a filtered post.
     if (el.querySelector('shreddit-post, a, button, img, video, iframe, svg, input, select, textarea')) return false;
     const text = (el.textContent || '').trim();
     return text.length === 0;
@@ -210,9 +218,6 @@
       getDividerSiblings(container).forEach(sib => toHide.add(sib));
     });
 
-    // Two-pass diff against whatever we previously hid (posts AND dividers),
-    // so anything that should no longer be hidden gets restored even if it
-    // isn't a <shreddit-post> itself.
     document.querySelectorAll(`[${HIDE_MARK_ATTR}]`).forEach(el => {
       if (!toHide.has(el)) {
         el.style.display = '';
@@ -238,11 +243,13 @@
 
   const feedObserver = new MutationObserver(scheduleApplyFeedFilters);
   function startFeedObserver() {
-    feedObserver.observe(document.body, { childList: true, subtree: true });
+    if (document.body) {
+      feedObserver.observe(document.body, { childList: true, subtree: true });
+    }
   }
 
   /* ====================
-     Create UI: main button, mini button, settings panel
+     UI Elements Creation
      ==================== */
   const BUTTON_ID = 'reddit-pro-toggle-btn';
   const MINI_ID = 'reddit-pro-mini-btn';
@@ -277,7 +284,7 @@
         padding: '6px 10px', fontSize: '13px', borderRadius: '8px',
         border: 'none', backgroundColor: '#ff4500', color: '#fff',
         cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
-        boxSizing: 'border-box'
+        boxSizing: 'border-box', display: 'none'
     });
     miniBtn.addEventListener('click', () => {
         toggleSettingsPanel(true);
@@ -300,7 +307,7 @@
     panel.innerHTML = `
       <div style="font-weight:700; font-size:15px; margin-bottom:10px; color:#fff; display:flex; align-items:baseline; justify-content:space-between;">
         <span>⚙ Reddit Pro Settings</span>
-        <span style="font-size:11px; color:#818384; font-weight:400;">v2.3</span>
+        <span style="font-size:11px; color:#818384; font-weight:400;">v2.3.4</span>
       </div>
 
       <label style="display:block; margin-bottom:10px; font-size:13px;">Font size: <span id="rp_fontSize_val" style="color:#ff4500; font-weight:600;">${settings.fontSize}px</span><input id="rp_fontSize" type="range" min="${MIN.fontSize}" max="22" value="${settings.fontSize}" style="width:100%; accent-color:#ff4500;"></label>
@@ -357,7 +364,6 @@
   /* ====================
      UI Update Logic
      ==================== */
-
   function updateButtonVisibility() {
       if (!toggleBtn || !miniBtn) return;
       toggleBtn.style.display = settings.toggleBtnHidden ? 'none' : 'inline-flex';
@@ -388,9 +394,6 @@
     miniBtn.style.fontFamily = settings.fontFamily;
   }
 
-  /* ====================
-     Settings panel logic
-     ==================== */
   function toggleSettingsPanel(show) {
     if (!settingsPanel) return;
     settingsPanel.style.display = show ? 'block' : 'none';
@@ -404,9 +407,6 @@
   function wireSettingsEvents() {
     if (!settingsPanel) return;
 
-    // key here is the settings property name itself, so `save(c.key, value)`
-    // always updates the exact value every other function reads — no more
-    // disconnect between "what the slider wrote" and "what the styles use".
     const controls = {
         fontSize: { slider: '#rp_fontSize', val: '#rp_fontSize_val', key: 'fontSize', min: MIN.fontSize, suffix: 'px', callback: updateSiteStyles },
         voteBtnSize: { slider: '#rp_voteBtnSize', val: '#rp_voteBtnSize_val', key: 'voteBtnSize', min: MIN.voteBtnSize, suffix: 'px', callback: updateSiteStyles },
@@ -464,9 +464,6 @@
     });
   }
 
-  /* ====================
-     Tampermonkey menu commands
-     ==================== */
   function registerMenuCommands() {
     try {
       GM_registerMenuCommand("Show/Hide Reddit Pro Button", () => {
@@ -509,9 +506,6 @@
     applyFeedFilters();
     startFeedObserver();
 
-    // Safety net: re-assert styles/visibility/filters in case Reddit's SPA
-    // re-renders and strips our <style> tag, button nodes, or hidden posts
-    // resurface after a navigation the observer didn't catch.
     setInterval(() => {
       updateSiteStyles();
       updateButtonVisibility();
