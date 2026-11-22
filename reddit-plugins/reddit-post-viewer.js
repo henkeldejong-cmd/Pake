@@ -54,7 +54,7 @@
     const CACHE_MAX_ITEMS = 50;
 
     // --- State Management ---
-    let useAltHover = GM_getValue('rpp_use_alt_hover', false);
+    let useCtrlHover = GM_getValue('rpp_use_ctrl_hover', true); // Default to true so Ctrl+Hover is active
 
     // --- Cache ---
     const cache = {
@@ -164,19 +164,19 @@
 
     // --- Toggle Logic ---
     function toggleTriggerMode() {
-        useAltHover = !useAltHover;
-        GM_setValue('rpp_use_alt_hover', useAltHover);
-        const status = useAltHover ? "ON (Alt + Hover)" : "OFF (Hover only)";
-        showToast(`Trigger Mode: ${status}`);
+    useCtrlHover = !useCtrlHover;
+    GM_setValue('rpp_use_ctrl_hover', useCtrlHover);
+    const status = useCtrlHover ? "ON (Ctrl + Hover)" : "OFF (Disabled)";
+    showToast(`Trigger Mode: ${status}`);
+}
+
+GM_registerMenuCommand("Toggle Ctrl+Hover Mode", toggleTriggerMode);
+
+document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && (e.key === 'q' || e.key === 'Q')) {
+        toggleTriggerMode();
     }
-
-    GM_registerMenuCommand("Toggle Hover/Alt+Hover", toggleTriggerMode);
-
-    document.addEventListener('keydown', (e) => {
-        if (e.altKey && (e.key === 'q' || e.key === 'Q')) {
-            toggleTriggerMode();
-        }
-    });
+});
 
     // --- CSS for UI ---
     const style = document.createElement('style');
@@ -460,19 +460,14 @@
     }
 
     document.addEventListener('mouseenter', (e) => {
-        const link = getClosestRedditLink(e.target);
-        if (!link) return;
+    const link = getClosestRedditLink(e.target);
+    if (!link) return;
 
-        if (useAltHover && !e.altKey) return;
+    // Require Ctrl key to be held down
+    if (useCtrlHover && !e.ctrlKey) return;
 
-        const jsonUrl = link.href.split('?')[0].replace(/\/$/, '') + '.json';
-        activationTimeout = setTimeout(() => showPopup(jsonUrl), HOVER_DELAY);
-    }, true);
-
-    document.addEventListener('mouseleave', (e) => {
-        if (getClosestRedditLink(e.target)) {
-            clearTimeout(activationTimeout);
-        }
-    }, true);
+    const jsonUrl = link.href.split('?')[0].replace(/\/$/, '') + '.json';
+    activationTimeout = setTimeout(() => showPopup(jsonUrl), HOVER_DELAY);
+}, true);
 
 })();
