@@ -20,7 +20,7 @@ jobs:
       - name: Check combined JS syntax
         shell: bash
         run: |
-          cat belay-plugins/belay-shim.js belay-plugins/all-in-one-toolkit.js belay-plugins/bypass-paywall.js belay-plugins/explain-x.js belay-plugins/inline-summaries.js belay-plugins/olympus-tts.js belay-plugins/post-tools.js belay-plugins/refined-dark-theme.js > combined-check.js
+          cat belay-plugins/belay-shim.js belay-plugins/all-in-one-toolkit.js belay-plugins/bypass-paywall.js belay-plugins/explain-x.js belay-plugins/inline-summaries.js belay-plugins/olympus-tts.js belay-plugins/refined-dark-theme.js > combined-check.js
           node --check combined-check.js
           rm combined-check.js
 
@@ -33,7 +33,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Belay Homepage MSI
-        run: node dist/cli.js http://localhost:8000/Bookmarks/Belay_Homepage.html --name "Belay Homepage" --identifier com.pake.belay.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url --internal-url-regex "^https?://" --inject ./belay-plugins/belay-shim.js --inject ./belay-plugins/all-in-one-toolkit.js --inject ./belay-plugins/bypass-paywall.js --inject ./belay-plugins/explain-x.js --inject ./belay-plugins/inline-summaries.js --inject ./belay-plugins/olympus-tts.js --inject ./belay-plugins/post-tools.js --inject ./belay-plugins/refined-dark-theme.js
+        run: node dist/cli.js http://localhost:8000/Bookmarks/Belay_Homepage.html --name "Belay Homepage" --identifier com.pake.belay.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url --internal-url-regex "^https?://" --inject ./belay-plugins/belay-shim.js --inject ./belay-plugins/all-in-one-toolkit.js --inject ./belay-plugins/bypass-paywall.js --inject ./belay-plugins/explain-x.js --inject ./belay-plugins/inline-summaries.js --inject ./belay-plugins/olympus-tts.js --inject ./belay-plugins/refined-dark-theme.js
 
       - name: Upload Belay Homepage MSI
         uses: actions/upload-artifact@v4
