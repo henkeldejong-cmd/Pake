@@ -1,0 +1,36 @@
+name: Build My Custom Facebook App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "fb-plugins/**"
+      - ".github/workflows/build-facebook.yml"
+  workflow_dispatch:
+
+jobs:
+  build-facebook-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Setup Pake environment
+        uses: ./.github/actions/setup-env
+        with:
+          mode: build
+
+      - name: Build Pake CLI
+        run: pnpm run cli:build
+
+      - name: Build Custom Facebook MSI
+        run: node dist/cli.js https://www.facebook.com --name "Facebook" --width 1200 --height 800 --inject ./fb-plugins/fb-shim.js --inject ./fb-plugins/all-in-one-toolkit.js --inject ./fb-plugins/explainx.js --inject ./fb-plugins/facebook-ad-remover-light.js --inject ./fb-plugins/fb-pro-playlist.js --inject ./fb-plugins/inline-summaries.js --inject ./fb-plugins/post-tools.js
+
+      - name: Upload Facebook MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-facebook-msi
+          path: "*.msi"
+          if-no-files-found: error
