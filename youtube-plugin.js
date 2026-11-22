@@ -133,6 +133,14 @@ GM_addStyle(`
     --yt-plugin-sidebar-w: ${localStorage.getItem('ytLucky_sidebarWidth') || '420'}px;
   }
 
+/* --- ANCHOR STYLES --- */
+  ytd-watch-flexy[flexy] #player { margin-left: 0 !important; }
+  ytd-watch-flexy #primary.ytd-watch-flexy { margin-left: 0 !important; padding-left: 5px !important; }
+  ytd-watch-flexy #columns.ytd-watch-flexy { margin-left: 0 !important; padding-left: 0 !important; }
+  #yt-anchor-scroll-top { position: fixed; bottom: 44px; right: 16px; z-index: 2000; background: rgba(0,0,0,0.65); color: #fff; border: none; border-radius: 4px; padding: 4px 8px; font: 600 10px/1.4 "YouTube Sans", Arial, sans-serif; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,.4); transition: background .15s; display: none; }
+  #yt-anchor-scroll-top:hover { background: rgba(0,0,0,0.85); }
+  #yt-anchor-spacer { display: none; width: 100%; flex-shrink: 0; }
+  
   /* Top controls adjustment when sidebar is open */
   body.yt-sidebar-open #yt-lucky-controls-v3-wrapper {
     right: var(--yt-plugin-sidebar-w) !important;
@@ -605,7 +613,7 @@ function buildDefaultProSettings() {
       playlistWidth: 380, playlistScale: 100, mainBtnSize: 44,
       luckyScale: 100, luckyHeightVh: 45
     },
-    layout: { feedOffset: 0, hideSidebar: false, feedDisabled: false },
+    layout: { feedOffset: 0, hideSidebar: false, feedDisabled: false, anchorMode: false },
     toggles: {
       hideHomeFeed: false, hideVideoSidebar: true, hideRecommended: true,
       hideLiveChat: true, hideWatchPlaylist: true, hideFundraiser: true,
@@ -2612,6 +2620,89 @@ const YouTubeHub = (() => {
   };
 })();
 
+const YtAnchor = {
+  anchored: false, spacerEl: null, debounceTimer: null,
+  q: sel => document.querySelector(sel),
+  isWatch: () => location.pathname === '/watch',
+  ensureSpacer() {
+    if (this.spacerEl && this.spacerEl.isConnected) return this.spacerEl;
+    this.spacerEl = document.getElementById('yt-anchor-spacer');
+    if (!this.spacerEl) { this.spacerEl = document.createElement('div'); this.spacerEl.id = 'yt-anchor-spacer'; }
+    const below = this.q('#below'); if (below && below.parentNode) below.parentNode.insertBefore(this.spacerEl, below);
+    return this.spacerEl;
+  },
+  anchor() {
+    if (!this.isWatch() || !cfg.layout.anchorMode) return;
+    const player = this.q('#movie_player'); if (!player) return;
+    if (player.style.position === 'fixed') return;
+
+    const rect = player.getBoundingClientRect();
+    const w = Math.round(rect.width || player.offsetWidth);
+    const h = Math.round(rect.height || player.offsetHeight);
+
+    player.style.position = 'fixed';
+    player.style.left = '5px';
+    player.style.top = '56px';
+    player.style.width = w + 'px';
+    player.style.height = h + 'px';
+    player.style.zIndex = '1000';
+
+    const spacer = this.ensureSpacer();
+    spacer.style.height = (56 + h + 16) + 'px';
+    spacer.style.display = 'block';
+
+    const primary = this.q('#primary');
+    if (primary) primary.style.paddingLeft = (5 + w + 16) + 'px';
+
+    this.anchored = true;
+    this.updateScrollBtn();
+  },
+  unanchor() {
+    const player = this.q('#movie_player');
+    if (player) {
+      player.style.position = '';
+      player.style.left = '';
+      player.style.top = '';
+      player.style.width = '';
+      player.style.height = '';
+      player.style.zIndex = '';
+    }
+    const primary = this.q('#primary'); if (primary) primary.style.paddingLeft = '';
+    if (this.spacerEl) { this.spacerEl.style.display = 'none'; this.spacerEl.style.height = '0'; }
+
+    this.anchored = false;
+    this.updateScrollBtn();
+  },
+  updateScrollBtn() {
+    let scrollBtn = document.getElementById('yt-anchor-scroll-top');
+    if (!scrollBtn && this.anchored) {
+      scrollBtn = document.createElement('button'); scrollBtn.id = 'yt-anchor-scroll-top';
+      scrollBtn.textContent = '▲ Player'; scrollBtn.title = 'Scroll back to the top to see the player';
+      scrollBtn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+      document.body.appendChild(scrollBtn);
+    }
+    if (scrollBtn) scrollBtn.style.display = this.anchored ? 'block' : 'none';
+  },
+  init() {
+    window.addEventListener('resize', () => { if (this.anchored) { this.unanchor(); this.anchor(); } });
+    window.addEventListener('yt-navigate-finish', () => {
+      if (!this.isWatch()) { if (this.anchored) this.unanchor(); return; }
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = setTimeout(() => {
+        if (cfg.layout.anchorMode) {
+          if (this.anchored) this.unanchor();
+          this.anchor();
+        } else {
+          this.unanchor();
+        }
+      }, 300);
+    });
+    if (cfg.layout.anchorMode) {
+      setTimeout(() => this.anchor(), 2000);
+    }
+  }
+};
+
 /* ================= YouTubePro ================= */
 const YouTubePro = (() => {
   const FONTS = [
@@ -2740,6 +2831,12 @@ const YouTubePro = (() => {
             <span style="color:#aaa;">Hide Left Guide</span>
             <input type="checkbox" id="ytp-hide-sidebar" ${lo.hideSidebar ? 'checked' : ''}>
           </label>
+		  <!-- ADD THIS CHECKBOX -->
+  <label style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;">
+    <span style="color:#aaa;">Anchor Edge Player</span>
+    <input type="checkbox" id="ytp-anchor-mode" ${lo.anchorMode ? 'checked' : ''}>
+  </label>
+</div>
         </div>
       </div>
     `;
@@ -2836,15 +2933,12 @@ const YouTubePro = (() => {
     setSafeDOM(panel, content);
     document.body.appendChild(panel);
     
-    panel.querySelector('#ytp-mode-toggle').onclick = () => {
-      if (window.location.hostname === 'm.youtube.com') {
-        try { document.cookie = 'PREF=f6=40000000; domain=.youtube.com; path=/; max-age=31536000'; } catch(_) {}
-        window.location.href = 'https://www.youtube.com/?app=desktop&persist_app=1';
-      } else {
-        try { document.cookie = 'PREF=f6=0; domain=.youtube.com; path=/; max-age=31536000'; } catch(_) {}
-        window.location.href = 'https://m.youtube.com/?app=m&persist_app=1';
-      }
-    };
+    panel.querySelector('#ytp-anchor-mode').onchange = e => {
+  cfg.layout.anchorMode = e.target.checked;
+  saveProSettings();
+  if (e.target.checked) YtAnchor.anchor();
+  else YtAnchor.unanchor();
+};
     
     panel.querySelectorAll('.ytp-tab').forEach(tab => {
       tab.onclick = () => {
@@ -4497,6 +4591,7 @@ const mainObs = new MutationObserver(() => {
       YouTubeHub.ensureSidebar();
       YouTubeHub.loadInitial();
       YouTubePro.buildPanel();
+	  YtAnchor.init();
       applyProStyles();
       initBackgroundBypass();
       initUI();
