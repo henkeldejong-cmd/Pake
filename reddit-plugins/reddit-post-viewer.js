@@ -1,5 +1,51 @@
+// ==UserScript==
+// @name         Reddit Hover Post & Comment Downloader (Desktop App Edition)
+// @namespace    http://tampermonkey.net/
+// @version      5.4.1
+// @description  View, download, or copy Reddit posts and comments. Adapted for desktop app wrappers.
+// @author       You (modified)
+// @match        https://www.reddit.com/*
+// @match        https://www.google.com/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      reddit.com
+// @connect      redd.it
+// @license      MIT
+// ==/UserScript==
+
 (function () {
-    'use-strict';
+    'use strict';
+
+    /* ====================
+       Desktop App GM_* Polyfills
+       ==================== */
+    if (typeof GM_getValue === 'undefined') {
+        window.GM_getValue = (k, d) => {
+            try {
+                const r = localStorage.getItem(k);
+                if (r === null) return d;
+                try { return JSON.parse(r); } catch(_) { return r; }
+            } catch(_) { return d; }
+        };
+    }
+
+    if (typeof GM_setValue === 'undefined') {
+        window.GM_setValue = (k, v) => {
+            try {
+                localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
+            } catch(_) {}
+        };
+    }
+
+    if (typeof GM_registerMenuCommand === 'undefined') {
+        window.GM_registerMenuCommand = () => {};
+    }
+
+    if (typeof GM_xmlhttpRequest === 'undefined') {
+        window.GM_xmlhttpRequest = undefined;
+    }
 
     // --- Configuration ---
     const MAX_TOP_LEVEL_COMMENTS = 15;
@@ -24,7 +70,7 @@
         }
     };
 
-    // --- CORS-Safe Fetch using GM_xmlhttpRequest ---
+    // --- CORS-Safe Fetch using GM_xmlhttpRequest with standard fetch fallback ---
     function fetchRedditJson(url) {
         return new Promise((resolve, reject) => {
             if (typeof GM_xmlhttpRequest === 'function') {
@@ -49,7 +95,7 @@
                     ontimeout: () => reject(new Error('Request timed out'))
                 });
             } else {
-                fetch(url)
+                fetch(url, { headers: { 'Accept': 'application/json' } })
                     .then(res => {
                         if (!res.ok) throw new Error(`HTTP status: ${res.status}`);
                         return res.json();
@@ -207,17 +253,14 @@
         if (!popup.parentElement) root.appendChild(popup);
     }
 
-    // Positions panel 20px from visible viewport top regardless of containing blocks
     function updatePopupPosition() {
         if (popup.style.display === 'none') return;
         ensureElementsAttached();
         const probeRect = probe.getBoundingClientRect();
-        // probeRect.top is 0 if fixed works natively, or negative (-scrollY) if trapped
         const targetTop = 20 - probeRect.top;
         popup.style.setProperty('top', targetTop + 'px', 'important');
     }
 
-    // Capture-phase listener detects scrolling on window, body, or Google's inner scroll containers
     window.addEventListener('scroll', updatePopupPosition, { passive: true, capture: true });
     window.addEventListener('resize', updatePopupPosition, { passive: true });
 
