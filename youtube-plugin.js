@@ -285,14 +285,94 @@ GM_addStyle(`
     }
   }
 
-  /* Sidebar */
-  #yt-lucky-playlist-sidebar-v3 { padding: 6px 8px !important; overflow: hidden !important; }
-  #yt-lucky-playlist-sidebar-v3 > div:first-of-type { margin-bottom: 4px !important; gap: 3px !important; scrollbar-width: none; }
-  #yt-lucky-playlist-sidebar-v3 > div:first-of-type::-webkit-scrollbar { display: none; }
-  #yt-lucky-playlist-sidebar-v3 > div:first-of-type button:hover { filter: brightness(1.25); }
-  #yt-lucky-playlist-sidebar-v3 input[type="text"] { padding: 4px 8px !important; font-size: 11px !important; }
-  #yt-lucky-playlist-sidebar-v3 button { -webkit-tap-highlight-color: transparent !important; outline: none !important; border: none !important; background-clip: padding-box !important; }
-  #yt-lucky-playlist-sidebar-v3 button yt-touch-feedback-shape { display: none !important; }
+  :root {
+    --yt-plugin-sidebar-w: ${localStorage.getItem('ytLucky_sidebarWidth') || '420'}px;
+  }
+
+  /* Top controls adjustment when sidebar is open */
+  body.yt-sidebar-open #yt-lucky-controls-v3-wrapper {
+    right: var(--yt-plugin-sidebar-w) !important;
+    width: calc(100% - var(--yt-plugin-sidebar-w)) !important;
+    transition: right 0.2s ease, width 0.2s ease;
+  }
+
+  /* Push YouTube content left when sidebar is open */
+  body.yt-sidebar-open {
+    margin-right: var(--yt-plugin-sidebar-w) !important;
+    box-sizing: border-box;
+  }
+
+  /* Right Sidebar Styles */
+  #yt-lucky-playlist-sidebar-v3 {
+    position: fixed !important;
+    top: var(--yt-plugin-bar-h, 40px) !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: auto !important;
+    width: var(--yt-plugin-sidebar-w) !important;
+    height: auto !important;
+    display: flex;
+    flex-direction: column;
+    background: rgba(18,18,18,0.98);
+    color: #fff;
+    padding: 6px 8px;
+    border-radius: 0 !important;
+    border-left: 1px solid #222;
+    z-index: 2147483645;
+    box-shadow: -4px 0 24px rgba(0,0,0,0.7);
+    font-size: 14px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  /* Left Edge Width Resize Handle */
+  .resize-handle-pl {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    width: 6px !important;
+    height: auto !important;
+    transform: none !important;
+    cursor: ew-resize !important;
+    background: rgba(255,255,255,0.06);
+    border-radius: 0 !important;
+    z-index: 20;
+  }
+  .resize-handle-pl:hover {
+    background: rgba(255,0,0,0.5);
+  }
+
+  /* BelayTube Logo Styles */
+  a#logo yt-icon,
+  a#logo ytd-logo,
+  a#logo > *:not(#belaytube-container) {
+      display: none !important;
+  }
+  #belaytube-container {
+      display: flex;
+      align-items: center;
+      height: 100%;
+  }
+  #belaytube-icon {
+      width: 28px;
+      height: 20px;
+      margin-right: 6px;
+      flex-shrink: 0;
+      transform: translateY(1px);
+  }
+  .belaytube-text {
+      font-family: "YouTube Sans", "Roboto", "Arial", sans-serif !important;
+      font-weight: 500 !important;
+      font-size: 20px !important;
+      letter-spacing: -0.4px !important;
+      color: var(--yt-spec-text-primary);
+      line-height: 1;
+  }
+  a#logo {
+      display: flex !important;
+      align-items: center !important;
+  }
 
   /* Hide YouTube UI */
   .ytp-unmute, .ytp-unmute-button, .ytp-unmute-overlay, .ytp-tap-to-unmute, .ytp-unmute-animation, button[aria-label*="Unmute" i], button[title*="Unmute" i] { display: none !important; }
@@ -435,6 +515,15 @@ function fixFullWidth() {
     if (tb) { tb.style.width = '100%'; tb.style.marginRight = '0'; tb.style.marginLeft = '0'; }
     return;
   }
+  
+function updateSidebarVisibilityState(visible) {
+  if (visible) {
+    document.body.classList.add('yt-sidebar-open');
+  } else {
+    document.body.classList.remove('yt-sidebar-open');
+  }
+}
+
   const targetCssWidth = window.innerWidth / z;
   const sb = document.getElementById('yt-lucky-playlist-sidebar-v3');
   if (sb) {
@@ -451,6 +540,43 @@ function fixFullWidth() {
     tb.style.marginRight = `-${Math.max(0, targetCssWidth - parentW)}px`;
     tb.style.marginLeft = '0';
   }
+}
+
+function buildBelayLogoElement() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const container = document.createElement('div');
+    container.id = 'belaytube-container';
+
+    const svg = document.createElementNS(NS, 'svg');
+    svg.id = 'belaytube-icon';
+    svg.setAttribute('viewBox', '0 0 29 20');
+
+    const redPath = document.createElementNS(NS, 'path');
+    redPath.setAttribute('d', 'M27.9727 3.12324C27.6435 1.89323 26.6768 0.926623 25.4468 0.597366C23.2197 0 14.285 0 14.285 0C14.285 0 5.35042 0 3.12323 0.597366C1.89323 0.926623 0.926623 1.89323 0.597366 3.12324C0 5.35042 0 10 0 10C0 10 0 14.6496 0.597366 16.8768C0.926623 18.1068 1.89323 19.0734 3.12323 19.4026C5.35042 20 14.285 20 14.285 20C14.285 20 23.2197 20 25.4468 19.4026C26.6768 19.0734 27.6435 18.1068 27.9727 16.8768C28.5701 14.6496 28.5701 10 28.5701 10C28.5701 10 28.5677 5.35042 27.9727 3.12324Z');
+    redPath.setAttribute('fill', '#FF0000');
+
+    const whitePath = document.createElementNS(NS, 'path');
+    whitePath.setAttribute('d', 'M11.4253 14.2854L18.8477 10.0004L11.4253 5.71533V14.2854Z');
+    whitePath.setAttribute('fill', '#FFFFFF');
+
+    svg.appendChild(redPath);
+    svg.appendChild(whitePath);
+
+    const text = document.createElement('span');
+    text.className = 'belaytube-text';
+    text.textContent = 'BelayTube';
+
+    container.appendChild(svg);
+    container.appendChild(text);
+    return container;
+}
+
+function replaceLogo() {
+    document.querySelectorAll('a#logo').forEach(link => {
+        if (!link.querySelector('#belaytube-container')) {
+            link.appendChild(buildBelayLogoElement());
+        }
+    });
 }
 
 /* ================= PRO Settings ================= */
@@ -3506,27 +3632,42 @@ function createPlaylistSidebar() {
   if (document.getElementById('yt-lucky-playlist-sidebar-v3')) return;
   const sb = document.createElement('div');
   sb.id = 'yt-lucky-playlist-sidebar-v3';
-  Object.assign(sb.style, {
-    position: 'fixed', bottom: '0', left: '0', right: '0', width: '100vw',
-    display: loadPlaylistVisible() ? 'flex' : 'none',
-    flexDirection: 'column', justifyContent: 'flex-start', alignItems: 'stretch',
-    background: 'rgba(18,18,18,0.97)', color: '#fff', padding: '6px 8px',
-    borderRadius: '14px 14px 0 0', zIndex: 2147483645,
-    boxShadow: '0 -4px 24px rgba(0,0,0,0.7)', fontSize: '14px', boxSizing: 'border-box',
-    overflow: 'hidden'
-  });
   
-  const savedH = localStorage.getItem('ytLucky_sidebarHeightBottom') || (cfg.ui.luckyHeightVh ? cfg.ui.luckyHeightVh + 'vh' : '45vh');
-  let initialVh = parseFloat(savedH);
-  if (isNaN(initialVh)) initialVh = 45;
-  initialVh = Math.max(25, Math.min(80, initialVh));
-  sb.style.height = initialVh + 'vh';
-  sb._luckyScale = 1;
+  const isVisible = loadPlaylistVisible();
+  sb.style.display = isVisible ? 'flex' : 'none';
+  updateSidebarVisibilityState(isVisible);
 
-  // Resize handle
+  // Left Edge Width Resize Handle
   const rh = document.createElement('div');
   rh.className = 'resize-handle-pl';
-  Object.assign(rh.style, { position: 'absolute', top: '0', left: '50%', transform: 'translateX(-50%)', width: '60px', height: '14px', cursor: 'ns-resize', background: 'rgba(255,255,255,0.2)', borderBottomLeftRadius: '8px', borderBottomRightRadius: '8px', zIndex: '9' });
+  const startResize = e => {
+    e.preventDefault();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const startW = sb.getBoundingClientRect().width;
+    const startX = clientX;
+    
+    const onMove = me => {
+      const cx = me.touches ? me.touches[0].clientX : me.clientX;
+      const deltaX = startX - cx; // dragging left increases width
+      const newW = Math.max(300, Math.min(900, startW + deltaX));
+      sb.style.width = newW + 'px';
+      document.documentElement.style.setProperty('--yt-plugin-sidebar-w', newW + 'px');
+      localStorage.setItem('ytLucky_sidebarWidth', newW);
+    };
+    const onEnd = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('mouseup', onEnd);
+      document.removeEventListener('touchend', onEnd);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('mouseup', onEnd);
+    document.addEventListener('touchend', onEnd);
+  };
+  rh.addEventListener('mousedown', startResize);
+  rh.addEventListener('touchstart', startResize, { passive: false });
+  sb.appendChild(rh);
   
   const startResize = e => {
     e.preventDefault();
@@ -4367,6 +4508,7 @@ function initUI() {
     sb.style.display = n ? 'flex' : 'none';
     listBtn.textContent = n ? 'List: Hide' : 'List: Show';
     savePlaylistVisible(n);
+	updateSidebarVisibilityState(n); // <--- Add this line
   };
   
   row.append(inp, go, artistBtn, artistSubWrap, lyricsBtn, autoBtn, listBtn);
@@ -4444,6 +4586,7 @@ let _mutationT = null;
 
 const mainObs = new MutationObserver(() => {
   if (!document.body) return;
+  replaceLogo(); // <--- Ensure this is invoked here
   if (!window._ytLuckyBootstrapped) {
     const tb = document.querySelector('ytd-masthead #end, ytd-masthead #end-container, #end, ytm-mobile-topbar-renderer');
     if (tb || IS_MOBILE) {
