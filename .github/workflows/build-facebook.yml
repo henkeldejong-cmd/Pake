@@ -26,7 +26,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Custom Facebook MSI
-        run: node dist/cli.js https://www.facebook.com --name "Facebook" --width 1200 --height 800 --no-restore-last-url --user-agent "Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140" --inject ./fb-plugins/all-in-one-toolkit.js --inject ./fb-plugins/explainx.js --inject ./fb-plugins/facebook-ad-remover-light.js --inject ./fb-plugins/fb-pro-playlist.js --inject ./fb-plugins/inline-summaries.js --inject ./fb-plugins/post-tools.js
+        run: node dist/cli.js https://www.facebook.com --name "Facebook" --identifier com.pake.facebook.custom --width 1200 --height 800 --new-window --no-restore-last-url
 
       - name: Upload Facebook MSI
         uses: actions/upload-artifact@v4
