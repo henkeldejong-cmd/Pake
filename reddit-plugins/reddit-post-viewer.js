@@ -1,65 +1,64 @@
 (function () {
-    'use strict';
+    'use-strict';
 
     // --- Configuration ---
     const MAX_TOP_LEVEL_COMMENTS = 15;
     const MAX_REPLY_DEPTH = 5;
-    const CACHE_MAX_ITEMS = 100;
-    const CACHE_EXPIRATION_MS = 2 * 60 * 60 * 1000; // 2 hours
-    const HOVER_DELAY_MS = 450; // Hover time before opening preview
+    const HOVER_DELAY = 500;
+    const CACHE_MAX_ITEMS = 50;
 
-    // --- Global State ---
-    let isPopupClosing = false;
-    let savedScrollY = 0;
-    let popupOpenedTimestamp = 0;
-    let hoverTimer = null;
-    let activeHoverLink = null;
-    let backdrop = null;
-    let popup = null;
+    // --- State Management ---
+    let useAltHover = GM_getValue('rpp_use_alt_hover', false);
 
-    // --- Persistent, Time-Aware Cache ---
-    const persistentCache = {
-        get(key) {
-            const itemStr = localStorage.getItem(key);
-            if (!itemStr) return null;
-            try {
-                const item = JSON.parse(itemStr);
-                if ((Date.now() - item.timestamp) > CACHE_EXPIRATION_MS) {
-                    localStorage.removeItem(key);
-                    return null;
-                }
-                return item.data;
-            } catch (e) {
-                localStorage.removeItem(key);
-                return null;
-            }
-        },
+    // --- Cache ---
+    const cache = {
+        get(key) { const i = sessionStorage.getItem(key); return i ? JSON.parse(i) : null; },
         set(key, value) {
-            const item = { data: value, timestamp: Date.now() };
-            try {
-                localStorage.setItem(key, JSON.stringify(item));
-                this.cleanup();
-            } catch (e) {
-                console.error("Cache Error: Failed to set item.", e);
-                this.cleanup(true);
+            let keys = JSON.parse(sessionStorage.getItem('__cache_keys__') || '[]');
+            if (!keys.includes(key)) {
+                keys.push(key);
+                if (keys.length > CACHE_MAX_ITEMS) { sessionStorage.removeItem(keys.shift()); }
+                sessionStorage.setItem('__cache_keys__', JSON.stringify(keys));
             }
-        },
-        cleanup(force = false) {
-            const keys = Object.keys(localStorage);
-            const cacheKeys = keys.filter(k => k.startsWith('rpp_cache_'));
-            if (!force && cacheKeys.length < CACHE_MAX_ITEMS) return;
-
-            const items = cacheKeys.map(key => {
-                let timestamp = 0;
-                try { timestamp = (JSON.parse(localStorage.getItem(key)) || {}).timestamp || 0; } catch (e) {}
-                return { key, timestamp };
-            });
-
-            items.sort((a, b) => a.timestamp - b.timestamp);
-            const toRemove = items.slice(0, items.length - CACHE_MAX_ITEMS + (force ? 10 : 0));
-            toRemove.forEach(item => localStorage.removeItem(item.key));
+            sessionStorage.setItem(key, JSON.stringify(value));
         }
     };
+
+    // --- CORS-Safe Fetch using GM_xmlhttpRequest ---
+    function fetchRedditJson(url) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: url,
+                    headers: { 'Accept': 'application/json' },
+                    onload: (res) => {
+                        if (res.status >= 200 && res.status < 300) {
+                            try {
+                                resolve(JSON.parse(res.responseText));
+                            } catch (e) {
+                                reject(new Error('Failed to parse JSON response'));
+                            }
+                        } else if (res.status === 429) {
+                            reject(new Error('Rate limited by Reddit (HTTP 429)'));
+                        } else {
+                            reject(new Error(`Reddit responded with status ${res.status}`));
+                        }
+                    },
+                    onerror: () => reject(new Error('Network error fetching Reddit post')),
+                    ontimeout: () => reject(new Error('Request timed out'))
+                });
+            } else {
+                fetch(url)
+                    .then(res => {
+                        if (!res.ok) throw new Error(`HTTP status: ${res.status}`);
+                        return res.json();
+                    })
+                    .then(resolve)
+                    .catch(reject);
+            }
+        });
+    }
 
     // --- Helper Functions ---
     function downloadTextFile(filename, content) {
@@ -68,242 +67,189 @@
         link.href = URL.createObjectURL(blob);
         link.download = filename;
         link.click();
-        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+        URL.revokeObjectURL(link.href);
     }
 
     async function copyToClipboard(text, button) {
         try {
             await navigator.clipboard.writeText(text);
+            const originalText = button.textContent;
             button.textContent = 'Copied!';
-            setTimeout(() => { button.textContent = 'Copy'; }, 2000);
+            setTimeout(() => { button.textContent = originalText; }, 2000);
         } catch (err) {
             console.error('Failed to copy text: ', err);
+            const originalText = button.textContent;
             button.textContent = 'Error!';
-            setTimeout(() => { button.textContent = 'Copy'; }, 2000);
+            setTimeout(() => { button.textContent = originalText; }, 2000);
         }
     }
 
+    // --- On-Screen Message (Toast) ---
+    function showToast(message) {
+        let toast = document.getElementById('rpp-toast-msg');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'rpp-toast-msg';
+            Object.assign(toast.style, {
+                position: 'fixed',
+                bottom: '20px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                backgroundColor: '#333',
+                color: '#fff',
+                padding: '10px 20px',
+                borderRadius: '5px',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
+                zIndex: '2147483647',
+                fontSize: '14px',
+                fontFamily: 'sans-serif',
+                transition: 'opacity 0.3s ease',
+                opacity: '0',
+                pointerEvents: 'none'
+            });
+            (document.body || document.documentElement).appendChild(toast);
+        }
+        toast.textContent = message;
+        toast.style.opacity = '1';
+
+        if (toast.dataset.timeoutId) clearTimeout(parseInt(toast.dataset.timeoutId));
+        toast.dataset.timeoutId = setTimeout(() => { toast.style.opacity = '0'; }, 2000);
+    }
+
+    // --- Toggle Logic ---
+    function toggleTriggerMode() {
+        useAltHover = !useAltHover;
+        GM_setValue('rpp_use_alt_hover', useAltHover);
+        const status = useAltHover ? "ON (Alt + Hover)" : "OFF (Hover only)";
+        showToast(`Trigger Mode: ${status}`);
+    }
+
+    GM_registerMenuCommand("Toggle Hover/Alt+Hover", toggleTriggerMode);
+
+    document.addEventListener('keydown', (e) => {
+        if (e.altKey && (e.key === 'q' || e.key === 'Q')) {
+            toggleTriggerMode();
+        }
+    });
+
+    // --- CSS for UI ---
+    const style = document.createElement('style');
+    style.textContent = `
+        .hover-comment-popup {
+            position: fixed !important;
+            right: 20px !important;
+            width: 500px !important;
+            max-width: 90vw !important;
+            background-color: #1a1a1b !important;
+            color: #d7dadc !important;
+            border: 1px solid #343536 !important;
+            border-radius: 8px !important;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.4) !important;
+            z-index: 2147483647 !important;
+            max-height: 85vh !important;
+            display: flex;
+            flex-direction: column;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+            outline: none !important;
+        }
+        .hover-comment-popup .popup-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #343536; background-color: #2a2a2c; flex-shrink: 0; }
+        .hover-comment-popup .popup-header-main { flex-grow: 1; min-width: 0; }
+        .hover-comment-popup h3 { margin: 0; font-size: 16px; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .popup-controls { display: flex; align-items: center; gap: 10px; padding-left: 10px; }
+        .rpp-main-btn {
+            background-color: #0079d3;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            min-width: 60px;
+        }
+        .rpp-main-btn:hover { background-color: #148be0; }
+        .close-button { font-size: 24px; line-height: 1; font-weight: bold; cursor: pointer; color: #818384; padding: 0 5px; }
+        .popup-content-area { overflow-y: auto; }
+        .post-content-container { padding: 12px 16px; border-bottom: 2px solid #343536; background-color: #222224; }
+        .post-content-container img, .post-content-container video { max-width: 100%; border-radius: 8px; margin-top: 10px; }
+        .comments-container { padding: 0 16px; }
+        .rpp-comment-wrapper { padding: 10px 0; border-bottom: 1px solid #2a2a2c; }
+        .rpp-comment-body { font-size: 14px; line-height: 1.5; color: #d7dadc; word-wrap: break-word; }
+        .rpp-comment-body a { color: #4fbcff; text-decoration: none; }
+        .rpp-comment-meta { font-size: 12px; color: #818384; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .rpp-op-badge { background-color: #0079d3; color: white; font-weight: bold; padding: 2px 5px; border-radius: 3px; font-size: 10px; }
+        .rpp-action-btn { background: none; border: 1px solid #343536; color: #818384; cursor: pointer; border-radius: 3px; font-size: 10px; padding: 2px 5px; }
+        .rpp-action-btn:hover { background: #343536; color: #d7dadc; }
+        .rpp-meta-controls { margin-left: auto; display: flex; gap: 5px; }
+        .rpp-comment-wrapper[data-depth='1'] { margin-left: 20px; }
+        .rpp-toggle-replies { display: inline-block; margin-top: 8px; font-size: 12px; font-weight: bold; color: #818384; cursor: pointer; }
+        .rpp-replies-container { display: none; margin-top: 10px; border-left: 2px solid #343536; padding-left: 10px; }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+
+    // --- Panel & Viewport-Probe Creation ---
+    const popup = document.createElement('div');
+    popup.className = 'hover-comment-popup';
+    popup.style.display = 'none';
+
+    // Invisible probe to measure true viewport offset
+    const probe = document.createElement('div');
+    probe.id = 'rpp-viewport-probe';
+    probe.style.cssText = 'position:fixed!important;top:0px!important;left:0px!important;width:1px!important;height:1px!important;visibility:hidden!important;pointer-events:none!important;margin:0!important;padding:0!important;border:none!important;';
+
+    function ensureElementsAttached() {
+        const root = document.body || document.documentElement;
+        if (!probe.parentElement) root.appendChild(probe);
+        if (!popup.parentElement) root.appendChild(popup);
+    }
+
+    // Positions panel 20px from visible viewport top regardless of containing blocks
+    function updatePopupPosition() {
+        if (popup.style.display === 'none') return;
+        ensureElementsAttached();
+        const probeRect = probe.getBoundingClientRect();
+        // probeRect.top is 0 if fixed works natively, or negative (-scrollY) if trapped
+        const targetTop = 20 - probeRect.top;
+        popup.style.setProperty('top', targetTop + 'px', 'important');
+    }
+
+    // Capture-phase listener detects scrolling on window, body, or Google's inner scroll containers
+    window.addEventListener('scroll', updatePopupPosition, { passive: true, capture: true });
+    window.addEventListener('resize', updatePopupPosition, { passive: true });
+
+    function showPopupElement() {
+        ensureElementsAttached();
+        popup.style.display = 'flex';
+        updatePopupPosition();
+    }
+
+    function hidePopup() {
+        popup.style.display = 'none';
+        delete popup.dataset.currentUrl;
+    }
+
+    let activationTimeout;
+
     function decodeHtmlEntities(text) {
-        if (!text) return '';
         const ta = document.createElement('textarea');
         ta.innerHTML = text;
         return ta.value;
     }
 
-    // Find Reddit post/comment link even inside Shadow DOM (shreddit-post)
-    function findCommentLink(event) {
-        const path = event.composedPath ? event.composedPath() : [event.target];
-        for (const el of path) {
-            if (el === popup) return null; // Ignore links inside the preview popup itself
-            if (
-                el &&
-                el.tagName === 'A' &&
-                el.href &&
-                el.href.includes('/comments/') &&
-                !el.href.includes('/comment/')
-            ) {
-                return el;
-            }
-        }
-        return null;
-    }
-
-    // --- Popup Logic ---
-    function handleBackButton() {
-        if (Date.now() - popupOpenedTimestamp < 500) return;
-        if (popup && popup.classList.contains('visible')) {
-            hidePopup(true);
-        }
-    }
-
-    function hidePopup(isFromPopState = false) {
-        if (!popup || isPopupClosing || !popup.classList.contains('visible')) return;
-        isPopupClosing = true;
-
-        popup.classList.remove('visible');
-        backdrop.style.opacity = '0';
-
-        setTimeout(() => {
-            document.body.style.overflow = '';
-            popup.style.display = 'none';
-            backdrop.style.display = 'none';
-            backdrop.style.opacity = '';
-            delete popup.dataset.currentUrl;
-            window.scrollTo(0, savedScrollY);
-
-            if (!isFromPopState && window.history.state?.rpp_popup) {
-                history.back();
-            }
-            isPopupClosing = false;
-        }, 300);
-    }
-
-    async function processPost(linkElement) {
-        const jsonUrl = linkElement.href.split('?')[0].replace(/\/$/, '') + '.json';
-        const cacheKey = `rpp_cache_${jsonUrl}`;
-
-        if (popup.classList.contains('visible') && popup.dataset.currentUrl === jsonUrl) {
-            return;
-        }
-
-        document.body.style.cursor = 'progress';
-
-        try {
-            let data = persistentCache.get(cacheKey);
-            if (!data) {
-                const res = await fetch(jsonUrl);
-                if (!res.ok) throw new Error(`Fetch failed with status: ${res.status}`);
-                data = await res.json();
-                persistentCache.set(cacheKey, data);
-            }
-            renderPopupFromData(data, jsonUrl);
-        } catch (err) {
-            console.error("Reddit Preview Error:", err);
-            renderErrorPopup('Could not load comments. Reddit may be rate-limiting requests.');
-        } finally {
-            document.body.style.cursor = '';
-        }
-    }
-
-    function showPopup() {
-        if (popup.classList.contains('visible')) return;
-        savedScrollY = window.scrollY;
-        popupOpenedTimestamp = Date.now();
-
-        popup.style.display = 'flex';
-        backdrop.style.display = 'block';
-        document.body.style.overflow = 'hidden';
-
-        setTimeout(() => {
-            popup.classList.add('visible');
-        }, 10);
-
-        window.scrollTo(0, savedScrollY);
-
-        if (!window.history.state?.rpp_popup) {
-            history.pushState({ rpp_popup: true }, '', window.location.href);
-        }
-    }
-
-    function renderErrorPopup(message = 'Could not load comments.') {
-        popup.innerHTML = `
-            <div class="popup-header">
-                <h3>Error</h3>
-                <span class="close-button">×</span>
-            </div>
-            <div style="padding:20px; text-align:center;">${message}</div>
-        `;
-        popup.querySelector('.close-button').addEventListener('click', () => hidePopup());
-        showPopup();
-    }
-
-    function formatCommentsToString(comments, postAuthor, depth = 0) {
-        let text = '';
-        const indent = '    '.repeat(depth);
-
-        comments.forEach(comment => {
-            if (comment.kind !== 't1' || !comment.data.author) return;
-            const c = comment.data;
-            const isOp = c.author === postAuthor ? ' (OP)' : '';
-            text += `${indent}--- \n${indent}Author: ${c.author}${isOp}\n${indent}Score: ${c.score}\n\n${indent}${c.body.replace(/\n/g, `\n${indent}`)}\n\n`;
-            if (c.replies?.data?.children.length > 0) {
-                text += formatCommentsToString(c.replies.data.children, postAuthor, depth + 1);
-            }
-        });
-        return text;
-    }
-
-    function getFullContentAsText(postData, comments) {
-        let fullText = `========================================\nPOST\n========================================\n`;
-        fullText += `Title: ${postData.title}\nAuthor: ${postData.author}\nScore: ${postData.score}\nURL: https://www.reddit.com${postData.permalink}\n\n`;
-        fullText += postData.selftext ? `${postData.selftext}\n\n` : `[Link or Media Content: ${postData.url}]\n\n`;
-        fullText += `========================================\nCOMMENTS\n========================================\n\n`;
-        fullText += formatCommentsToString(comments, postData.author);
-        return fullText;
-    }
-
-    function renderPopupFromData(data, url) {
-        const postData = data[0].data.children[0].data;
-        const comments = data[1].data.children
-            .filter(c => c.kind === 't1' && c.data.author && !c.data.stickied)
-            .slice(0, MAX_TOP_LEVEL_COMMENTS);
-
-        popup.dataset.currentUrl = url;
-        popup.innerHTML = `
-            <div class="popup-header">
-                <div class="popup-header-main"><h3>${postData.title}</h3></div>
-                <div class="popup-controls">
-                    <button class="rpp-main-btn" id="rpp-copy-all">Copy</button>
-                    <button class="rpp-main-btn" id="rpp-download-all">Download</button>
-                    <span class="close-button">×</span>
-                </div>
-            </div>
-            <div class="popup-content-area">
-                <div class="post-content-container"></div>
-                <div class="comments-container"></div>
-            </div>
-        `;
-
-        popup.querySelector('.close-button').addEventListener('click', () => hidePopup());
-
-        const postContainer = popup.querySelector('.post-content-container');
-        const postMetaDiv = document.createElement('div');
-        postMetaDiv.className = 'rpp-comment-meta';
-        postMetaDiv.innerHTML = `<span><b>${postData.author}</b> (Post)</span> <span>⬆️ ${postData.score}</span>`;
-
-        const postControls = document.createElement('div');
-        postControls.className = 'rpp-meta-controls';
-
-        const postCopyBtn = document.createElement('button');
-        postCopyBtn.className = 'rpp-action-btn';
-        postCopyBtn.textContent = 'Copy Post';
-        const postContentText = `Title: ${postData.title}\nAuthor: ${postData.author}\n\n${postData.selftext}`;
-        postCopyBtn.onclick = () => copyToClipboard(postContentText, postCopyBtn);
-
-        postControls.appendChild(postCopyBtn);
-        postMetaDiv.appendChild(postControls);
-        postContainer.appendChild(postMetaDiv);
-
-        const postBodyDiv = document.createElement('div');
-        postBodyDiv.className = 'rpp-comment-body';
-
-        if (postData.selftext_html) {
-            postBodyDiv.innerHTML = decodeHtmlEntities(postData.selftext_html);
-        } else if (postData.post_hint === 'image') {
-            postBodyDiv.innerHTML = `<a href="${postData.url}" target="_blank"><img src="${postData.url}" alt="Post Image"></a>`;
-        } else if (postData.post_hint === 'hosted:video') {
-            postBodyDiv.innerHTML = `<video src="${postData.media.reddit_video.fallback_url}" controls muted loop preload="auto"></video>`;
-        } else if (postData.url) {
-            postBodyDiv.innerHTML = `<p><a href="${postData.url}" target="_blank">${postData.url}</a></p>`;
-        }
-        postContainer.appendChild(postBodyDiv);
-
-        const commentsContainer = popup.querySelector('.comments-container');
-        if (comments.length === 0) {
-            commentsContainer.innerHTML = '<div style="padding:20px; text-align:center; color:#818384;">No comments found.</div>';
-        } else {
-            comments.forEach(comment => renderCommentTree(comment.data, postData.author, commentsContainer, 0));
-        }
-
-        const fullContentText = getFullContentAsText(postData, comments);
-        const copyAllBtn = popup.querySelector('#rpp-copy-all');
-        copyAllBtn.addEventListener('click', () => copyToClipboard(fullContentText, copyAllBtn));
-        popup.querySelector('#rpp-download-all').addEventListener('click', () => downloadTextFile(`reddit_${postData.id}.txt`, fullContentText));
-
-        showPopup();
-    }
-
-    function renderCommentTree(commentData, postAuthor, parentElement, depth) {
+    function renderCommentTree(commentData, postData, parentElement, depth) {
         if (!commentData || !commentData.author || depth > MAX_REPLY_DEPTH) return;
-
         const wrapper = document.createElement('div');
         wrapper.className = 'rpp-comment-wrapper';
         wrapper.dataset.depth = depth;
 
         const metaDiv = document.createElement('div');
         metaDiv.className = 'rpp-comment-meta';
-        let metaHTML = `<span><b>${commentData.author}</b></span><span>•</span><span>⬆️ ${commentData.score}</span>`;
-        if (commentData.author === postAuthor) metaHTML += `<span class="rpp-op-badge">OP</span>`;
+        let metaHTML = `<span><b>${commentData.author}</b></span> <span>⬆️ ${commentData.score}</span>`;
+        if (commentData.author === postData.author) { metaHTML += `<span class="rpp-op-badge">OP</span>`; }
         metaDiv.innerHTML = metaHTML;
 
         const metaControls = document.createElement('div');
@@ -312,9 +258,20 @@
         const copyBtn = document.createElement('button');
         copyBtn.className = 'rpp-action-btn';
         copyBtn.textContent = 'Copy';
-        copyBtn.onclick = () => copyToClipboard(commentData.body, copyBtn);
+        copyBtn.onclick = () => {
+            const fileContent = `Author: ${commentData.author}\nScore: ${commentData.score}\n\n${commentData.body}`;
+            copyToClipboard(fileContent, copyBtn);
+        };
 
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'rpp-action-btn';
+        saveBtn.textContent = 'Save';
+        saveBtn.onclick = () => {
+            const fileContent = `Author: ${commentData.author}\nScore: ${commentData.score}\n\n${commentData.body}`;
+            downloadTextFile(`reddit_${postData.id}_comment_${commentData.id}.txt`, fileContent);
+        };
         metaControls.appendChild(copyBtn);
+        metaControls.appendChild(saveBtn);
         metaDiv.appendChild(metaControls);
         wrapper.appendChild(metaDiv);
 
@@ -330,17 +287,14 @@
                 const toggleBtn = document.createElement('div');
                 toggleBtn.className = 'rpp-toggle-replies';
                 toggleBtn.textContent = `▶ Show ${validReplies.length} replies`;
-
                 const repliesContainer = document.createElement('div');
                 repliesContainer.className = 'rpp-replies-container';
-
                 toggleBtn.addEventListener('click', () => {
-                    const isHidden = repliesContainer.style.display === 'none' || !repliesContainer.style.display;
+                    const isHidden = repliesContainer.style.display === 'none';
                     repliesContainer.style.display = isHidden ? 'block' : 'none';
                     toggleBtn.textContent = isHidden ? `▼ Hide replies` : `▶ Show ${validReplies.length} replies`;
                 });
-
-                validReplies.forEach(reply => renderCommentTree(reply.data, postAuthor, repliesContainer, depth + 1));
+                validReplies.forEach(reply => { renderCommentTree(reply.data, postData, repliesContainer, depth + 1); });
                 wrapper.appendChild(toggleBtn);
                 wrapper.appendChild(repliesContainer);
             }
@@ -348,208 +302,134 @@
         parentElement.appendChild(wrapper);
     }
 
-    // --- Initialization (Desktop Hover) ---
-    function init() {
-        GM_addStyle(GM_STYLES);
-
-        backdrop = document.createElement('div');
-        backdrop.className = 'rpp-backdrop';
-        backdrop.addEventListener('click', () => hidePopup());
-        document.body.appendChild(backdrop);
-
-        popup = document.createElement('div');
-        popup.className = 'hover-comment-popup';
-        document.body.appendChild(popup);
-
-        // Hover listener across light + Shadow DOM
-        document.addEventListener('mouseover', (event) => {
-            if (popup.classList.contains('visible')) return;
-            const link = findCommentLink(event);
-            if (!link) return;
-            if (activeHoverLink === link) return;
-
-            clearTimeout(hoverTimer);
-            activeHoverLink = link;
-
-            hoverTimer = setTimeout(() => {
-                if (activeHoverLink === link) {
-                    processPost(link);
-                }
-            }, HOVER_DELAY_MS);
-        }, true);
-
-        document.addEventListener('mouseout', (event) => {
-            if (!activeHoverLink) return;
-            const path = event.composedPath ? event.composedPath() : [event.target];
-            if (!path.includes(activeHoverLink)) return;
-            if (event.relatedTarget && activeHoverLink.contains(event.relatedTarget)) return;
-
-            clearTimeout(hoverTimer);
-            activeHoverLink = null;
-        }, true);
-
-        // Close on Escape key
-        document.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') hidePopup();
+    function formatCommentsToString(comments, postAuthor, depth = 0) {
+        let text = '';
+        const indent = '    '.repeat(depth);
+        comments.forEach(comment => {
+            if (comment.kind !== 't1' || !comment.data.author) return;
+            const c = comment.data;
+            const isOp = c.author === postAuthor ? ' (OP)' : '';
+            text += `${indent}--- \n${indent}Author: ${c.author}${isOp}\n${indent}Score: ${c.score}\n\n${indent}${c.body.replace(/\n/g, `\n${indent}`)}\n\n`;
+            if (c.replies?.data?.children.length > 0) { text += formatCommentsToString(c.replies.data.children, postAuthor, depth + 1); }
         });
-
-        window.addEventListener('popstate', handleBackButton);
+        return text;
     }
 
-    // --- Injected CSS (Centered Desktop Modal) ---
-    const GM_STYLES = `
-        .rpp-backdrop {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0,0,0,0.6);
-            z-index: 9998;
-            display: none;
-            transition: opacity 0.3s;
-        }
-        .hover-comment-popup {
-            position: fixed;
-            bottom: 20px;
-            left: 50%;
-            width: 92%;
-            max-width: 780px;
-            max-height: 85vh;
-            background-color: #1a1a1b;
-            color: #d7dadc;
-            border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-            z-index: 9999;
-            display: none;
-            flex-direction: column;
-            transform: translate(-50%, 110%);
-            transition: transform 0.25s ease-out;
-        }
-        .hover-comment-popup.visible {
-            transform: translate(-50%, 0);
-        }
-        .hover-comment-popup .popup-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 12px 16px;
-            border-bottom: 1px solid #343536;
-            background-color: #2a2a2c;
-            flex-shrink: 0;
-            border-top-left-radius: 16px;
-            border-top-right-radius: 16px;
-        }
-        .hover-comment-popup .popup-header-main {
-            flex-grow: 1;
-            min-width: 0;
-        }
-        .hover-comment-popup h3 {
-            margin: 0;
-            font-size: 16px;
-            color: #fff;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .popup-controls {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding-left: 10px;
-        }
-        .rpp-main-btn {
-            background-color: #0079d3;
-            color: white;
-            border: none;
-            padding: 5px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: bold;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .close-button {
-            font-size: 24px;
-            line-height: 1;
-            font-weight: bold;
-            cursor: pointer;
-            color: #818384;
-            padding: 0 4px;
-        }
-        .close-button:hover { color: #fff; }
-        .popup-content-area { overflow-y: auto; }
-        .post-content-container {
-            padding: 12px 16px;
-            border-bottom: 2px solid #343536;
-            background-color: #222224;
-        }
-        .post-content-container img,
-        .post-content-container video {
-            max-width: 100%;
-            border-radius: 4px;
-            margin-top: 8px;
-        }
-        .comments-container { padding: 0 16px 16px; }
-        .rpp-comment-wrapper {
-            padding: 10px 0;
-            border-bottom: 1px solid #2a2a2c;
-        }
-        .rpp-comment-body {
-            font-size: 14px;
-            line-height: 1.5;
-            color: #d7dadc;
-            word-wrap: break-word;
-        }
-        .rpp-comment-body a { color: #4fbcff; }
-        .rpp-comment-meta {
-            font-size: 12px;
-            color: #818384;
-            margin-bottom: 6px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-        .rpp-op-badge {
-            background-color: #0079d3;
-            color: white;
-            font-weight: bold;
-            padding: 2px 5px;
-            border-radius: 3px;
-            font-size: 10px;
-        }
-        .rpp-action-btn {
-            background: none;
-            border: 1px solid #343536;
-            color: #818384;
-            cursor: pointer;
-            border-radius: 3px;
-            font-size: 10px;
-            padding: 2px 6px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .rpp-meta-controls { margin-left: auto; display: flex; gap: 5px; }
-        .rpp-toggle-replies {
-            display: inline-block;
-            margin-top: 8px;
-            font-size: 12px;
-            font-weight: bold;
-            color: #818384;
-            cursor: pointer;
-        }
-        .rpp-replies-container {
-            display: none;
-            margin-top: 10px;
-            border-left: 2px solid #343536;
-            padding-left: 10px;
-        }
-    `;
+    function getFullContentAsText(postData, comments) {
+        let fullText = `========================================\nPOST\n========================================\n`;
+        fullText += `Title: ${postData.title}\nAuthor: ${postData.author}\nScore: ${postData.score}\nURL: https://www.reddit.com${postData.permalink}\n\n`;
+        fullText += postData.selftext ? `${postData.selftext}\n\n` : `[Link or Media Content: ${postData.url}]\n\n`;
+        fullText += `========================================\nCOMMENTS\n========================================\n\n`;
+        fullText += formatCommentsToString(comments, postData.author);
+        return fullText;
+    }
 
-    if (document.body) init();
-    else window.addEventListener('DOMContentLoaded', init, { once: true });
+    function renderPopupFromData(data, url) {
+        const postData = data[0].data.children[0].data;
+        const comments = data[1].data.children.filter(c => c.kind === 't1' && c.data.author && !c.data.stickied).slice(0, MAX_TOP_LEVEL_COMMENTS);
+
+        popup.dataset.currentUrl = url;
+        popup.innerHTML = `
+            <div class="popup-header">
+                <div class="popup-header-main"><h3>${postData.title}</h3></div>
+                <div class="popup-controls">
+                     <button class="rpp-main-btn" id="rpp-copy-all">Copy</button>
+                     <button class="rpp-main-btn" id="rpp-download-all">Download</button>
+                     <span class="close-button">×</span>
+                </div>
+            </div>
+            <div class="popup-content-area">
+                <div class="post-content-container"></div>
+                <div class="comments-container"></div>
+            </div>`;
+        popup.querySelector('.close-button').addEventListener('click', hidePopup);
+
+        const postContainer = popup.querySelector('.post-content-container');
+        const postMetaDiv = document.createElement('div');
+        postMetaDiv.className = 'rpp-comment-meta';
+        postMetaDiv.innerHTML = `<span><b>${postData.author}</b> (Post)</span> <span>⬆️ ${postData.score}</span>`;
+
+        const postControls = document.createElement('div');
+        postControls.className = 'rpp-meta-controls';
+        const postCopyBtn = document.createElement('button');
+        postCopyBtn.className = 'rpp-action-btn';
+        postCopyBtn.textContent = 'Copy Post';
+        const postContentText = `Title: ${postData.title}\nAuthor: ${postData.author}\nScore: ${postData.score}\nURL: ${postData.url}\n\n${postData.selftext}`;
+        postCopyBtn.onclick = () => copyToClipboard(postContentText, postCopyBtn);
+
+        const postSaveBtn = document.createElement('button');
+        postSaveBtn.className = 'rpp-action-btn';
+        postSaveBtn.textContent = 'Save Post';
+        postSaveBtn.onclick = () => downloadTextFile(`reddit_post_${postData.id}.txt`, postContentText);
+
+        postControls.appendChild(postCopyBtn);
+        postControls.appendChild(postSaveBtn);
+        postMetaDiv.appendChild(postControls);
+        postContainer.appendChild(postMetaDiv);
+
+        const postBodyDiv = document.createElement('div');
+        postBodyDiv.className = 'rpp-comment-body';
+        if (postData.selftext_html) { postBodyDiv.innerHTML = decodeHtmlEntities(postData.selftext_html); }
+        else if (postData.post_hint === 'image') { postBodyDiv.innerHTML = `<a href="${postData.url}" target="_blank"><img src="${postData.url}" alt="Post Image"></a>`; }
+        else if (postData.post_hint === 'hosted:video') { postBodyDiv.innerHTML = `<video src="${postData.media.reddit_video.fallback_url}" controls muted loop preload="auto"></video>`; }
+        else if (postData.url) { postBodyDiv.innerHTML = `<p>Link: <a href="${postData.url}" target="_blank">${postData.url}</a></p>`; }
+        postContainer.appendChild(postBodyDiv);
+
+        const commentsContainer = popup.querySelector('.comments-container');
+        if (comments.length === 0) { commentsContainer.innerHTML = '<div style="padding: 20px; text-align: center; color: #818384;">No comments found.</div>'; }
+        else { comments.forEach(comment => renderCommentTree(comment.data, postData, commentsContainer, 0)); }
+
+        const fullContentText = getFullContentAsText(postData, comments);
+        const copyAllBtn = popup.querySelector('#rpp-copy-all');
+        copyAllBtn.addEventListener('click', () => copyToClipboard(fullContentText, copyAllBtn));
+        popup.querySelector('#rpp-download-all').addEventListener('click', () => downloadTextFile(`reddit_${postData.id}_full.txt`, fullContentText));
+
+        showPopupElement();
+    }
+
+    async function showPopup(jsonUrl) {
+        if (popup.style.display === 'flex' && popup.dataset.currentUrl === jsonUrl) return;
+
+        const cachedData = cache.get(jsonUrl);
+        if (cachedData) { renderPopupFromData(cachedData, jsonUrl); return; }
+
+        showPopupElement();
+        popup.innerHTML = `<div class="popup-header"><h3>Loading...</h3><span class="close-button">×</span></div>`;
+        popup.querySelector('.close-button').addEventListener('click', hidePopup);
+
+        try {
+            const data = await fetchRedditJson(jsonUrl);
+            cache.set(jsonUrl, data);
+            renderPopupFromData(data, jsonUrl);
+        } catch (err) {
+            console.error("Reddit Preview Error:", err);
+            popup.querySelector('h3').textContent = err.message || 'Error loading post';
+        }
+    }
+
+    function getClosestRedditLink(target) {
+        if (!target) return null;
+        const el = target instanceof Element ? target : target.parentElement;
+        if (!el || typeof el.closest !== 'function') return null;
+        const link = el.closest('a[href*="/comments/"]');
+        if (!link || link.href.includes('/search')) return null;
+        return link;
+    }
+
+    document.addEventListener('mouseenter', (e) => {
+        const link = getClosestRedditLink(e.target);
+        if (!link) return;
+
+        if (useAltHover && !e.altKey) return;
+
+        const jsonUrl = link.href.split('?')[0].replace(/\/$/, '') + '.json';
+        activationTimeout = setTimeout(() => showPopup(jsonUrl), HOVER_DELAY);
+    }, true);
+
+    document.addEventListener('mouseleave', (e) => {
+        if (getClosestRedditLink(e.target)) {
+            clearTimeout(activationTimeout);
+        }
+    }, true);
+
 })();
