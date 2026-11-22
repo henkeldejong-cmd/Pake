@@ -20,7 +20,7 @@ jobs:
       - name: Check combined JS syntax
         shell: bash
         run: |
-          cat reddit-plugins/reddit-shim.js reddit-plugins/inline-summaries.js reddit-plugins/reddit-post-viewer.js reddit-plugins/reddit-pro.js > combined-check.js
+          cat reddit-plugins/reddit-shim.js reddit-plugins/reddit-post-viewer.js reddit-plugins/reddit-pro.js > combined-check.js
           node --check combined-check.js
           rm combined-check.js
 
@@ -33,7 +33,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Custom Reddit MSI
-        run: node dist/cli.js https://www.reddit.com --name "Reddit" --identifier com.pake.reddit.custom --width 1200 --height 800 --new-window --no-restore-last-url --inject ./reddit-plugins/reddit-shim.js --inject ./reddit-plugins/inline-summaries.js --inject ./reddit-plugins/reddit-post-viewer.js --inject ./reddit-plugins/reddit-pro.js
+        run: node dist/cli.js https://www.reddit.com --name "Reddit" --identifier com.pake.reddit.custom --width 1200 --height 800 --new-window --no-restore-last-url --inject ./reddit-plugins/reddit-shim.js --inject ./reddit-plugins/reddit-post-viewer.js --inject ./reddit-plugins/reddit-pro.js
 
       - name: Upload Reddit MSI
         uses: actions/upload-artifact@v4
