@@ -33,7 +33,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Custom Facebook MSI
-        run: node dist/cli.js https://m.facebook.com --name "Facebook" --identifier com.pake.facebook.mobile --width 520 --height 720 --new-window --no-restore-last-url --user-agent "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36" --inject ./fb-plugins/fb-shim.js --inject ./fb-plugins/all-in-one-toolkit.js --inject ./fb-plugins/explainx.js --inject ./fb-plugins/facebook-ad-remover-light.js --inject ./fb-plugins/fb-pro-playlist.js --inject ./fb-plugins/inline-summaries.js --inject ./fb-plugins/post-tools.js
+        run: node dist/cli.js https://www.facebook.com --name "Facebook" --identifier com.pake.facebook.mobile --width 1280 --height 760 --maximize --new-window --no-restore-last-url --inject ./fb-plugins/fb-shim.js --inject ./fb-plugins/all-in-one-toolkit.js --inject ./fb-plugins/explainx.js --inject ./fb-plugins/facebook-ad-remover-light.js --inject ./fb-plugins/fb-pro-playlist.js --inject ./fb-plugins/inline-summaries.js --inject ./fb-plugins/post-tools.js
 
       - name: Upload Facebook MSI
         uses: actions/upload-artifact@v4
