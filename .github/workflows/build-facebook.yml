@@ -17,6 +17,13 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v4
 
+      - name: Check combined JS syntax
+        shell: bash
+        run: |
+          cat fb-plugins/fb-shim.js fb-plugins/all-in-one-toolkit.js fb-plugins/explainx.js fb-plugins/facebook-ad-remover-light.js fb-plugins/fb-pro-playlist.js fb-plugins/inline-summaries.js fb-plugins/post-tools.js > combined-check.js
+          node --check combined-check.js
+          rm combined-check.js
+
       - name: Setup Pake environment
         uses: ./.github/actions/setup-env
         with:
@@ -26,7 +33,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Custom Facebook MSI
-        run: node dist/cli.js https://www.facebook.com --name "Facebook" --identifier com.pake.facebook.custom --width 1200 --height 800 --new-window --no-restore-last-url
+        run: node dist/cli.js https://m.facebook.com --name "Facebook" --identifier com.pake.facebook.mobile --width 520 --height 720 --new-window --no-restore-last-url --user-agent "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Mobile Safari/537.36" --inject ./fb-plugins/fb-shim.js --inject ./fb-plugins/all-in-one-toolkit.js --inject ./fb-plugins/explainx.js --inject ./fb-plugins/facebook-ad-remover-light.js --inject ./fb-plugins/fb-pro-playlist.js --inject ./fb-plugins/inline-summaries.js --inject ./fb-plugins/post-tools.js
 
       - name: Upload Facebook MSI
         uses: actions/upload-artifact@v4
