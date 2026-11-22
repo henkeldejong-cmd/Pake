@@ -1,5 +1,115 @@
+// ==UserScript==
+// @name         Post Tools — X, Reddit & Facebook (Desktop App Edition)
+// @namespace    http://tampermonkey.net/
+// @version      4.0.3
+// @description  AI-powered Copy, Truth, Explain & Reply on X (Twitter), Reddit, and Facebook. Adapted for desktop app wrappers.
+// @author       Expert Developer
+// @match        https://twitter.com/*
+// @match        https://x.com/*
+// @match        https://www.reddit.com/*
+// @match        https://old.reddit.com/*
+// @match        https://new.reddit.com/*
+// @match        https://www.facebook.com/*
+// @match        https://web.facebook.com/*
+// @match        https://m.facebook.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
+// @connect      generativelanguage.googleapis.com
+// @connect      openrouter.ai
+// @connect      api.groq.com
+// @connect      api.cerebras.ai
+// ==/UserScript==
+
 (function () {
     'use strict';
+
+    /* ====================
+       Desktop App GM_* Polyfills
+       ==================== */
+    if (typeof GM_getValue === 'undefined') {
+        window.GM_getValue = (k, d) => {
+            try {
+                const r = localStorage.getItem(k);
+                if (r === null) return d;
+                try { return JSON.parse(r); } catch(_) { return r; }
+            } catch(_) { return d; }
+        };
+    }
+
+    if (typeof GM_setValue === 'undefined') {
+        window.GM_setValue = (k, v) => {
+            try {
+                localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
+            } catch(_) {}
+        };
+    }
+
+    if (typeof GM_registerMenuCommand === 'undefined') {
+        window.GM_registerMenuCommand = () => {};
+    }
+
+    if (typeof GM_addStyle === 'undefined') {
+        window.GM_addStyle = (css) => {
+            const style = document.createElement('style');
+            style.textContent = css;
+            (document.head || document.documentElement).appendChild(style);
+            return style;
+        };
+    }
+
+    if (typeof GM_xmlhttpRequest === 'undefined') {
+        window.GM_xmlhttpRequest = (opts) => {
+            const ctrl = new AbortController();
+            const to = opts.timeout ? setTimeout(() => ctrl.abort(), opts.timeout) : null;
+            const init = {
+                method: opts.method || 'GET',
+                headers: opts.headers || {},
+                signal: ctrl.signal
+            };
+            if (opts.data) init.body = opts.data;
+
+            fetch(opts.url, init)
+                .then(res => {
+                    if (to) clearTimeout(to);
+                    return res.text().then(text => {
+                        let payload = text;
+                        if (opts.responseType === 'json') {
+                            try { payload = JSON.parse(text); } catch(_) { payload = null; }
+                        }
+                        if (opts.onload) {
+                            opts.onload({
+                                status: res.status,
+                                statusText: res.statusText,
+                                responseText: text,
+                                response: payload,
+                                finalUrl: res.url,
+                                readyState: 4
+                            });
+                        }
+                    });
+                })
+                .catch(err => {
+                    if (to) clearTimeout(to);
+                    if (err.name === 'AbortError') {
+                        if (opts.ontimeout) opts.ontimeout();
+                    } else {
+                        if (opts.onerror) opts.onerror(err);
+                    }
+                });
+            return { abort: () => ctrl.abort() };
+        };
+    }
+
+    function onBodyReady(fn) {
+        if (document.body) return fn();
+        window.addEventListener('DOMContentLoaded', fn, { once: true });
+        if (document.readyState === 'interactive' || document.readyState === 'complete') {
+            fn();
+        }
+    }
 
     // ==========================================
     // 1. PLATFORM DETECTION
@@ -39,76 +149,52 @@
         },
 
         reddit: {
-            anchorSelector: 'shreddit-post',
+            anchorSelector: [
+                'shreddit-post-action-row',
+                'shreddit-post',
+                'button[aria-label="More options"]',
+                'ul.flat-list.buttons'
+            ].join(', '),
             alreadyTagged: 'data-ai-tools',
             getWrapper(el) {
-                // Only attach inside a slotted element ([slot="credit-bar"]) so Shadow DOM
-                // always renders the buttons. Never append unslotted children to <shreddit-post>.
-                return el.querySelector('[slot="credit-bar"]');
+                const tag = el.tagName ? el.tagName.toLowerCase() : '';
+                if (tag === 'shreddit-post') {
+                    return el.querySelector('shreddit-post-action-row, [slot="credit-bar"]') || el;
+                }
+                if (tag === 'shreddit-post-action-row') return el;
+                if (el.matches('button[aria-label="More options"]')) {
+                    return el.closest('[data-click-id="body"]') || el.closest('.Post') || el.parentElement;
+                }
+                if (el.matches('ul.flat-list.buttons')) return el;
+                return el.parentElement || el;
             },
             getText(wrapper) {
                 const shPost = wrapper.closest('shreddit-post');
                 if (shPost) {
-                    const title =
-                        shPost.getAttribute('post-title') ||
-                        shPost.getAttribute('title') ||
-                        shPost.querySelector('[slot="title"], h1, h2')?.innerText ||
-                        '';
-                    const slot = shPost.querySelector('[slot="text-body"], [data-post-click-location="text-body"]');
+                    const title = shPost.getAttribute('post-title') || shPost.getAttribute('title') || shPost.querySelector('h1, h2')?.innerText || '';
+                    const slot = shPost.querySelector('[slot="text-body"]');
                     const bodyText = slot ? slot.innerText.trim() : '';
                     return [title, bodyText].filter(Boolean).join('\n\n').trim();
+                }
+                const body = wrapper.closest('.Post') || wrapper.closest('[data-testid="post-container"]');
+                if (body) {
+                    const textEl = body.querySelector('[data-click-id="text"] p, .RichTextJSON-root p');
+                    const titleEl = body.querySelector('h3, h1, [data-adclicklocation="title"]');
+                    return [titleEl?.innerText, textEl?.innerText].filter(Boolean).join('\n').trim();
+                }
+                const entry = wrapper.closest('.entry, .thing');
+                if (entry) {
+                    return [entry.querySelector('a.title')?.innerText, entry.querySelector('.usertext-body .md')?.innerText].filter(Boolean).join('\n').trim();
                 }
                 return '';
             },
             injectBtn(wrapper, btn) {
-                const overflowMenu =
-                    wrapper.querySelector('shreddit-post-overflow-menu')?.closest('shreddit-async-loader') ||
-                    wrapper.querySelector('shreddit-post-overflow-menu, shreddit-async-loader[bundlename*="overflow"]');
-
-                const trailingContainer =
-                    overflowMenu?.parentElement && overflowMenu.parentElement !== wrapper
-                        ? overflowMenu.parentElement
-                        : wrapper.children.length >= 2 && !wrapper.hasAttribute('data-rgb-feed-credit-bar')
-                            ? wrapper.lastElementChild
-                            : null;
-
-                // Classic / Desktop credit-bar with a trailing container for Join + Overflow menu
-                if (trailingContainer) {
-                    trailingContainer.style.display = 'inline-flex';
-                    trailingContainer.style.alignItems = 'center';
-                    trailingContainer.style.gap = '6px';
-                    trailingContainer.style.position = 'relative';
-                    trailingContainer.style.zIndex = '5';
-                    trailingContainer.style.pointerEvents = 'auto';
-
-                    const joinBtn = trailingContainer.querySelector('shreddit-join-button');
-                    const anchor = joinBtn || overflowMenu;
-                    if (anchor) {
-                        trailingContainer.insertBefore(btn, anchor);
-                    } else {
-                        trailingContainer.prepend(btn);
-                    }
+                if (wrapper.tagName === 'UL' && wrapper.classList.contains('buttons')) {
+                    const li = document.createElement('li');
+                    li.appendChild(btn);
+                    wrapper.appendChild(li);
                     return;
                 }
-
-                // Mobile data-rgb-feed-credit-bar / single-child flex-col layout:
-                // Pin buttons cleanly at the top-right inside [slot="credit-bar"].
-                wrapper.style.position = 'relative';
-                wrapper.style.width = '100%';
-                wrapper.style.boxSizing = 'border-box';
-
-                const hasOverflowInside = !!wrapper.querySelector(
-                    'shreddit-post-overflow-menu, button[aria-label*="more" i], faceplate-dropdown-menu'
-                );
-                wrapper.style.paddingRight = hasOverflowInside ? '144px' : '112px';
-
-                Object.assign(btn.style, {
-                    position: 'absolute',
-                    top: '0px',
-                    right: hasOverflowInside ? '36px' : '4px',
-                    zIndex: '10',
-                    marginRight: '0'
-                });
                 wrapper.appendChild(btn);
             }
         },
@@ -204,17 +290,6 @@
         cerebras: ['gpt-oss-120b', 'llama3.1-8b', 'llama-3.3-70b']
     };
 
-    const FONT_OPTIONS = [
-        { label: 'System Default', value: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif' },
-        { label: 'TwitterChirp', value: '"TwitterChirp", -apple-system, sans-serif' },
-        { label: 'Bodoni Moda', value: "'Bodoni Moda', serif" },
-        { label: 'Playfair Display', value: "'Playfair Display', serif" },
-        { label: 'Inter', value: "'Inter', sans-serif" },
-        { label: 'Josefin Sans', value: "'Josefin Sans', sans-serif" },
-        { label: 'Georgia', value: 'Georgia, serif' },
-        { label: 'Courier Prime', value: "'Courier Prime', monospace" }
-    ];
-
     const DEFAULT_SETTINGS = {
         apiMode: 'Hybrid',
         geminiKey: '',
@@ -234,8 +309,7 @@
         enableFacebook: true,
         explainDepth: 'Detailed',
         maxQuestions: 3,
-        uiFont: FONT_OPTIONS[0].value,
-        uiFontSize: 13,
+        uiFont: 'inherit',
         uiWidth: 450,
         uiHeight: 550,
         uiButtonSize: 'M',
@@ -278,75 +352,11 @@ OUTPUT REQUIREMENTS:
 `;
 
     // ==========================================
-    // 4. SETTINGS MANAGER (native-first storage)
+    // 4. SETTINGS MANAGER
     // ==========================================
     const Settings = {
-        _cache: {},
-
-        get(key) {
-            if (key in this._cache) return this._cache[key];
-
-            const storageKey = `x_adv_${key}`;
-            let value;
-
-            try {
-                if (typeof GM_getValue === 'function') {
-                    const v = GM_getValue(storageKey, undefined);
-                    if (v !== undefined && v !== null) value = v;
-                }
-            } catch (e) {
-                console.warn('Settings.get: GM_getValue failed', e);
-            }
-
-            if (value === undefined) {
-                try {
-                    if (typeof hcj !== 'undefined' && hcj.config) {
-                        const v = hcj.config.get(storageKey, undefined);
-                        if (v !== undefined) value = v;
-                    }
-                } catch (e) {}
-            }
-
-            if (value === undefined) {
-                try {
-                    const raw = localStorage.getItem(storageKey);
-                    if (raw !== null) {
-                        value = JSON.parse(raw);
-                        if (typeof GM_setValue === 'function') {
-                            try { GM_setValue(storageKey, value); } catch (e) {}
-                        }
-                    }
-                } catch (e) {}
-            }
-
-            if (value === undefined) value = DEFAULT_SETTINGS[key];
-            this._cache[key] = value;
-            return value;
-        },
-
-        set(key, val) {
-            const storageKey = `x_adv_${key}`;
-            this._cache[key] = val;
-
-            try {
-                if (typeof GM_setValue === 'function') {
-                    GM_setValue(storageKey, val);
-                }
-            } catch (e) {
-                console.warn('Settings.set: GM_setValue failed', e);
-            }
-
-            try {
-                if (typeof hcj !== 'undefined' && hcj.config) {
-                    hcj.config.set(storageKey, val);
-                }
-            } catch (e) {}
-
-            try {
-                localStorage.setItem(storageKey, JSON.stringify(val));
-            } catch (e) {}
-        },
-
+        get(key) { return GM_getValue(`x_adv_${key}`, DEFAULT_SETTINGS[key]); },
+        set(key, val) { GM_setValue(`x_adv_${key}`, val); },
         getAll() {
             const cfg = {};
             for (let k in DEFAULT_SETTINGS) cfg[k] = this.get(k);
@@ -355,84 +365,81 @@ OUTPUT REQUIREMENTS:
     };
 
     // ==========================================
-    // 5. CSS INJECTION (Matched to Toolkit Theme)
+    // 5. CSS INJECTION
     // ==========================================
-    const styleEl = document.createElement('style');
-    styleEl.textContent = `
-        @import url('https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600&family=Josefin+Sans:wght@400;600;700&family=Courier+Prime:ital@0;1&display=swap');
-
+    GM_addStyle(`
+        /* ─── PANEL SHELL ─── */
         .ai-tools-panel {
-            position: fixed; z-index: 2147483647; border-radius: 12px;
+            position: fixed; z-index: 2147483647; border-radius: 16px;
             display: flex; flex-direction: column; overflow: hidden;
-            box-shadow: 0 16px 48px rgba(0,0,0,0.85), 0 0 0 0.5px rgba(255,255,255,0.06);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
             transition: opacity 0.2s ease;
-            background: #0a1520 !important;
-            color: #e7e9ea !important;
-            border: 1px solid #1e2d3d !important;
+            background: #1a1a2e !important;
+            color: #e8e8f0 !important;
+            border: 1px solid #2d2d4e !important;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
         .ai-tools-header {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 10px 14px; border-bottom: 1px solid #1e2d3d;
-            font-weight: bold; font-size: 13px;
-            background: #0d1b26;
-            color: #e7e9ea;
+            padding: 12px 16px; border-bottom: 1px solid #2d2d4e;
+            font-weight: bold; font-size: 14px;
+            background: #16213e;
+            color: #e8e8f0;
         }
         .ai-tools-body {
             flex: 1; overflow-y: auto; padding: 16px;
             display: flex; flex-direction: column; gap: 12px;
-            background: #0a1520;
+            background: #1a1a2e;
         }
         .ai-tools-footer {
-            padding: 12px 16px; border-top: 1px solid #1e2d3d;
+            padding: 12px 16px; border-top: 1px solid #2d2d4e;
             display: flex; gap: 8px; align-items: center;
-            background: #0d1b26;
+            background: #16213e;
         }
         .ai-tools-btn-chrome {
             background: none; border: none; cursor: pointer; padding: 4px;
             border-radius: 50%; display: flex; align-items: center; justify-content: center;
-            transition: background 0.2s; color: #8b98a5;
+            transition: background 0.2s; color: #a0a0c0;
         }
-        .ai-tools-btn-chrome:hover { background: rgba(255,255,255,0.1); color: #e7e9ea; }
+        .ai-tools-btn-chrome:hover { background: rgba(255,255,255,0.1); }
         .ai-tools-chat-msg {
             padding: 8px 12px; border-radius: 12px; max-width: 90%;
             line-height: 1.5; font-size: 14px; margin-bottom: 4px;
         }
-        .ai-tools-chat-user { align-self: flex-end; background: #1d9bf0; color: #fff; }
-        .ai-tools-chat-bot  { align-self: flex-start; background: #16222f; color: #e7e9ea; }
+        .ai-tools-chat-user { align-self: flex-end; background: #1da1f2; color: #fff; }
+        .ai-tools-chat-bot  { align-self: flex-start; background: #252542; color: #e8e8f0; }
         .ai-tools-input {
-            flex: 1; border: 1px solid #1e2d3d; border-radius: 20px;
-            padding: 8px 14px; background: #0d1b26; outline: none;
-            font-size: 14px; color: #e7e9ea;
+            flex: 1; border: 1px solid #3d3d6e; border-radius: 20px;
+            padding: 8px 14px; background: #252542; outline: none;
+            font-size: 14px; color: #e8e8f0;
         }
-        .ai-tools-input::placeholder { color: #536471; }
+        .ai-tools-input::placeholder { color: #6060a0; }
         .ai-tools-chip {
             display: inline-block; padding: 4px 10px; border-radius: 16px;
-            font-size: 12px; cursor: pointer; border: 1px solid #1e2d3d;
+            font-size: 12px; cursor: pointer; border: 1px solid #3d3d6e;
             margin: 3px 2px; user-select: none; transition: all 0.2s;
-            color: #8b98a5; background: #16222f;
+            color: #a0a0c0; background: #252542;
         }
-        .ai-tools-chip:hover { border-color: #1d9bf0; color: #1d9bf0; }
-        .ai-tools-chip.active { background: #1d9bf0; color: #fff; border-color: #1d9bf0; }
-        .ai-tools-group summary { font-size: 12px; font-weight: bold; cursor: pointer; margin-bottom: 6px; padding-top: 8px; color: #8b98a5; }
-        .ai-tools-qa summary { cursor: pointer; color: #1d9bf0; font-weight: bold; font-size: 13px; margin-top: 6px; }
-        .ai-tools-qa p { margin: 6px 0 0 12px; padding-left: 10px; border-left: 2px solid #1d9bf0; font-size: 13px; color: #8b98a5; }
+        .ai-tools-chip:hover { border-color: #1da1f2; color: #1da1f2; }
+        .ai-tools-chip.active { background: #1da1f2; color: #fff; border-color: #1da1f2; }
+        .ai-tools-group summary { font-size: 13px; font-weight: bold; cursor: pointer; margin-bottom: 6px; padding-top: 8px; color: #c0c0e0; }
+        .ai-tools-qa summary { cursor: pointer; color: #1da1f2; font-weight: bold; font-size: 14px; margin-top: 6px; }
+        .ai-tools-qa p { margin: 6px 0 0 12px; padding-left: 10px; border-left: 2px solid #1da1f2; font-size: 13px; color: #c0c0e0; }
         .ai-tools-settings {
-            display: none; padding: 16px; border-bottom: 1px solid #1e2d3d;
-            font-size: 12px; flex-direction: column; gap: 12px;
-            max-height: 55vh; overflow-y: auto;
-            background: #0d1b26; color: #e7e9ea;
+            display: none; padding: 16px; border-bottom: 1px solid #2d2d4e;
+            font-size: 13px; flex-direction: column; gap: 12px;
+            max-height: 50vh; overflow-y: auto;
+            background: #12122a; color: #e8e8f0;
         }
         .ai-tools-settings.active { display: flex; }
-        .ai-tools-settings label { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: #8b98a5; }
+        .ai-tools-settings label { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: #c0c0e0; }
         .ai-tools-settings input[type="text"], .ai-tools-settings input[type="password"], .ai-tools-settings input[type="number"], .ai-tools-settings select {
-            padding: 6px; border-radius: 5px;
-            background: #0a1520; border: 1px solid #1e2d3d;
-            color: #e7e9ea; flex: 1; max-width: 60%; outline: none;
+            padding: 6px; border-radius: 4px;
+            background: #252542; border: 1px solid #3d3d6e;
+            color: #e8e8f0; flex: 1; max-width: 60%;
         }
-        .ai-tools-settings input[type="range"] { accent-color: #1d9bf0; flex: 1; height: 3px; }
-        .ai-tools-api-wrap { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed #1e2d3d; border-radius: 6px; }
-        .ai-tools-error { color: #f4212e; padding: 10px; background: rgba(244,33,46,0.1); border-radius: 8px; font-size: 13px; border: 1px solid #f4212e; }
+        .ai-tools-api-wrap { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed #3d3d6e; border-radius: 6px; }
+        .ai-tools-error { color: #ff6b6b; padding: 10px; background: rgba(255,107,107,0.1); border-radius: 8px; font-size: 13px; border: 1px solid #ff6b6b; }
 
         /* ─── INJECTED ACTION BUTTONS ─── */
         .ai-tools-action-btn-wrap {
@@ -450,51 +457,35 @@ OUTPUT REQUIREMENTS:
             user-select: none; padding: 0; width: 22px; height: 22px;
             box-sizing: border-box; vertical-align: middle;
         }
-        .ai-tools-action-btn:hover { background: rgba(29,155,240,0.12); color: #1d9bf0; border-color: #1d9bf0; }
+        .ai-tools-action-btn:hover { background: rgba(29,161,242,0.12); color: #1da1f2; border-color: #1da1f2; }
 
         /* REDDIT */
-        shreddit-post [slot="credit-bar"]:has(.ai-tools-action-btn-wrap) {
-            position: relative !important;
-            z-index: 3 !important;
-        }
         shreddit-post .ai-tools-action-btn-wrap {
-            position: relative;
-            z-index: 5 !important;
-            pointer-events: auto !important;
-            touch-action: manipulation !important;
             align-self: center;
-            margin-right: 4px;
-            gap: 6px;
+            margin-right: 8px;
+            gap: 4px;
         }
         shreddit-post .ai-tools-action-btn {
-            position: relative !important;
-            z-index: 5 !important;
-            pointer-events: auto !important;
-            touch-action: manipulation !important;
-            width: 22px;
-            height: 22px;
-            min-width: 22px;
-            min-height: 22px;
-            font-size: 11px;
+            width: 26px; height: 26px; font-size: 12px;
             border-radius: 5px;
-            color: var(--color-neutral-content-weak, #818384);
-            border: 1px solid rgba(128, 128, 128, 0.35);
-            background: rgba(15, 26, 28, 0.75);
+            color: var(--color-neutral-content-weak, #71767b);
+            border: 1px solid rgba(128,128,128,0.4);
         }
         shreddit-post .ai-tools-action-btn:hover {
-            background: rgba(255, 69, 0, 0.15);
+            background: rgba(255,69,0,0.12);
             color: #ff4500;
             border-color: #ff4500;
         }
 
         /* FACEBOOK */
         .xqcrz7y { overflow: visible !important; }
-        .xqcrz7y ~ .ai-tools-action-btn-wrap, [data-ai-tools] > .ai-tools-action-btn-wrap { align-self: center; margin-right: 4px; }
-    `;
-    (document.head || document.documentElement).appendChild(styleEl);
+        .xqcrz7y ~ .ai-tools-action-btn-wrap, [data-ai-tools] > .ai-tools-action-btn-wrap {
+            align-self: center; margin-right: 4px;
+        }
+    `);
 
     // ==========================================
-    // 6. API SERVICE
+    // 6. API SERVICE (CLEAN REST METHOD)
     // ==========================================
     const CACHE = new Map();
 
@@ -589,17 +580,16 @@ OUTPUT REQUIREMENTS:
     };
 
     // ==========================================
-    // 7. UI RENDERER
+    // 7. UI RENDERER & SETTINGS
     // ==========================================
     const UI = {
         getTheme() {
-            const accent = { twitter: '#1d9bf0', reddit: '#ff4500', facebook: '#1877f2' }[PLATFORM] || '#1d9bf0';
-            return { bg: '#0a1520', text: '#e7e9ea', border: '#1e2d3d', header: '#0d1b26', accent };
+            const accent = { twitter: '#1da1f2', reddit: '#ff4500', facebook: '#1877f2' }[PLATFORM] || '#1da1f2';
+            return { bg: '#1a1a2e', text: '#e8e8f0', border: '#2d2d4e', header: '#16213e', accent };
         },
 
         createActionButton(label, icon) {
             const btn = document.createElement('button');
-            btn.type = 'button';
             btn.className = 'ai-tools-action-btn';
             btn.title = label;
             btn.textContent = icon;
@@ -612,9 +602,6 @@ OUTPUT REQUIREMENTS:
             const cfg = Settings.getAll();
             const panel = document.createElement('div');
             panel.className = 'ai-tools-panel';
-
-            panel.style.fontFamily = cfg.uiFont;
-            panel.style.fontSize = cfg.uiFontSize + 'px';
 
             const pW = Math.min(cfg.uiWidth, window.innerWidth * 0.95);
             const pH = Math.min(cfg.uiHeight, window.innerHeight * 0.90);
@@ -656,14 +643,14 @@ OUTPUT REQUIREMENTS:
             };
 
             panel.innerHTML = `
-                <div class="ai-tools-header">
+                <div class="ai-tools-header" style="border-bottom: 2px solid ${th.accent};">
                     <span style="display:flex; align-items:center; gap:8px;">
                         <span style="width:8px; height:8px; border-radius:50%; background:${th.accent}; display:inline-block;"></span>
                         ${platformBadge} ${title}
                     </span>
                     <div style="display:flex; gap:8px;">
                         <button class="ai-tools-btn-chrome ai-btn-settings" title="Settings">⚙️</button>
-                        <button class="ai-tools-btn-chrome ai-btn-close" title="Close">✕</button>
+                        <button class="ai-tools-btn-chrome ai-btn-close" title="Close">✖</button>
                     </div>
                 </div>
                 <div class="ai-tools-settings">
@@ -703,18 +690,7 @@ OUTPUT REQUIREMENTS:
                     <label>Enable on Reddit: <input type="checkbox" id="ai-cfg-en-reddit" ${cfg.enableReddit ? 'checked' : ''}></label>
                     <label>Enable on Facebook: <input type="checkbox" id="ai-cfg-en-facebook" ${cfg.enableFacebook ? 'checked' : ''}></label>
 
-                    <strong style="margin-top:8px; margin-bottom:4px; font-size:14px; color:${th.accent};">Appearance</strong>
-                    <label>Font Family:
-                        <select id="ai-cfg-font">
-                            ${FONT_OPTIONS.map(f => `<option value="${f.value.replace(/"/g, '&quot;')}" ${cfg.uiFont === f.value ? 'selected' : ''}>${f.label}</option>`).join('')}
-                        </select>
-                    </label>
-                    <label>Font Size:
-                        <div style="display:flex; align-items:center; gap:8px; flex:1; max-width:60%;">
-                            <input type="range" id="ai-cfg-fsize" min="10" max="20" step="1" value="${cfg.uiFontSize}">
-                            <span id="ai-cfg-fsize-val" style="width:30px; text-align:right;">${cfg.uiFontSize}px</span>
-                        </div>
-                    </label>
+                    <strong style="margin-top:8px; margin-bottom:4px; font-size:14px; color:${th.accent};">Display</strong>
                     <label>Width (px): <input type="number" id="ai-cfg-w" value="${cfg.uiWidth}"></label>
                     <label>Height (px): <input type="number" id="ai-cfg-h" value="${cfg.uiHeight}"></label>
 
@@ -743,10 +719,6 @@ OUTPUT REQUIREMENTS:
             };
             modeSelect.addEventListener('change', refreshModeUI);
             refreshModeUI();
-
-            const fsizeSlider = panel.querySelector('#ai-cfg-fsize');
-            const fsizeVal = panel.querySelector('#ai-cfg-fsize-val');
-            fsizeSlider.oninput = (e) => fsizeVal.textContent = e.target.value + 'px';
 
             const bindModelSync = (selId, inputId) => {
                 const sel = panel.querySelector('#' + selId);
@@ -779,16 +751,11 @@ OUTPUT REQUIREMENTS:
                 Settings.set('groqModel', panel.querySelector('#ai-cfg-grqm').value.trim());
                 Settings.set('cerebrasKey', panel.querySelector('#ai-cfg-cer').value.trim());
                 Settings.set('cerebrasModel', panel.querySelector('#ai-cfg-cerm').value.trim());
-
                 Settings.set('enableTwitter', panel.querySelector('#ai-cfg-en-twitter').checked);
                 Settings.set('enableReddit', panel.querySelector('#ai-cfg-en-reddit').checked);
                 Settings.set('enableFacebook', panel.querySelector('#ai-cfg-en-facebook').checked);
-
-                Settings.set('uiFont', panel.querySelector('#ai-cfg-font').value);
-                Settings.set('uiFontSize', parseInt(panel.querySelector('#ai-cfg-fsize').value));
                 Settings.set('uiWidth', parseInt(panel.querySelector('#ai-cfg-w').value));
                 Settings.set('uiHeight', parseInt(panel.querySelector('#ai-cfg-h').value));
-
                 alert('Settings saved! Reopen the panel to apply changes.');
                 settingsDiv.classList.remove('active');
                 bodyDiv.style.display = 'flex';
@@ -842,24 +809,13 @@ OUTPUT REQUIREMENTS:
     const Features = {
         async runAnalysis(type, postText, anchorEl) {
             const config = Settings.getAll();
-            const panel  = UI.buildPanel(type === 'truth' ? 'Truth Analysis' : 'Deep Explanation', anchorEl);
+            const panel  = UI.buildPanel(type === 'truth' ? 'Truth Analysis' : 'Post Explanation', anchorEl);
             const body   = panel.querySelector('.ai-tools-body');
             const contentLabel = { twitter: 'tweet', reddit: 'post', facebook: 'post' }[PLATFORM] || 'post';
 
             const initialPrompt = type === 'truth'
                 ? `Analyze the truthfulness of this ${contentLabel} objectively. Return JSON ONLY: {"score":<number 0-100>,"verdict":"<short verdict>","context":"<why>"}.\n${contentLabel}: "${postText}"`
-                : `Act as an expert critical analyst and semantic interpreter. Analyze the following ${contentLabel} with deep nuance, focusing on subtext, underlying assumptions, rhetorical devices, and broader context. 
-Depth level requested: ${config.explainDepth}.
-Return JSON ONLY: 
-{
-    "summary": "<nuanced summary capturing the core message and its tone>",
-    "key_points": ["<point 1 with deeper insight>", "<point 2>", "<point 3>"],
-    "context": "<historical, cultural, or situational background that gives this post meaning>",
-    "nuance": "<explain any subtext, bias, irony, or potential misinterpretations>",
-    "qa": [{"q": "<thought-provoking question>", "a": "<expert answer>"}]
-}
-Generate exactly ${config.maxQuestions} QA pairs.
-${contentLabel}: "${postText}"`;
+                : `Analyze this ${contentLabel}. Depth: ${config.explainDepth}. Return JSON ONLY: {"summary":"<tldr>","key_points":["<pt>"],"context":"<bg>","qa":[{"q":"<ques>","a":"<ans>"}]}. Generate exactly ${config.maxQuestions} QA pairs.\n${contentLabel}: "${postText}"`;
 
             let chatHistory = [{ role: 'user', content: initialPrompt }];
             const loading = UI.addMessage(body, 'bot', '<span style="opacity:0.6;">Analyzing…</span>', true);
@@ -879,14 +835,7 @@ ${contentLabel}: "${postText}"`;
                         <p style="margin-top:10px; font-size:11px; opacity:0.6;">AI models can have biases. Ask follow-up questions to challenge this score.</p>
                     `, true);
                 } else {
-                    let html = `<b>Summary:</b> ${data.summary}<br><br>`;
-                    html += `<b>Key Points:</b><ul style="margin-top:4px; padding-left:20px;">${(data.key_points || []).map(k => `<li>${k}</li>`).join('')}</ul>`;
-                    html += `<br><b>Context:</b> ${data.context}`;
-
-                    if (data.nuance) {
-                        html += `<br><br><b>Nuance & Subtext:</b><div style="padding:8px; background:rgba(29,155,240,0.1); border-left:2px solid #1d9bf0; margin-top:4px; border-radius:4px;">${data.nuance}</div>`;
-                    }
-
+                    let html = `<b>Summary:</b> ${data.summary}<br><br><b>Key Points:</b><ul style="margin-top:4px;">${(data.key_points || []).map(k => `<li>${k}</li>`).join('')}</ul><br><b>Context:</b> ${data.context}`;
                     if (data.qa && data.qa.length) {
                         html += `<br><br><b>Follow-up Q&A:</b>`;
                         data.qa.forEach(item => { html += `<details class="ai-tools-qa"><summary>${item.q}</summary><p>${item.a}</p></details>`; });
@@ -927,7 +876,7 @@ ${contentLabel}: "${postText}"`;
                     <label><input type="radio" name="ai-r-len" value="long"> Long</label>
                 </div>
                 <textarea id="ai-r-context" placeholder="Optional context or stance (e.g. 'I agree but...')" style="width:100%; height:60px; border-radius:8px; padding:8px; background:transparent; color:${th.text}; border:1px solid ${th.border}; resize:none;"></textarea>
-                <button id="ai-r-generate" style="margin-top:12px; width:100%; padding:10px; border-radius:20px; background:${th.accent}; color:#fff; border:none; font-weight:bold; cursor:pointer;">Generate ${REPLY_LABEL.name}</button>
+                <button id="ai-r-generate" style="margin-top:12px; width:100%; padding:10px; border-radius:20px; background:#1da1f2; color:#fff; border:none; font-weight:bold; cursor:pointer;">Generate ${REPLY_LABEL.name}</button>
                 <div id="ai-r-output" style="margin-top:12px; display:none;">
                     <div style="padding:10px; border-radius:8px; background:rgba(128,128,128,0.1); font-size:14px; margin-bottom:8px; user-select:text;" id="ai-r-result"></div>
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -979,29 +928,6 @@ ${contentLabel}: "${postText}"`;
     // ==========================================
     // 9. BUTTON GROUP BUILDER (ANTI-DUPLICATION)
     // ==========================================
-    if (!window.__aiToolsClickGuard) {
-        window.__aiToolsClickGuard = true;
-        document.addEventListener('click', (e) => {
-            const path = e.composedPath ? e.composedPath() : [];
-            const wrap =
-                (e.target && e.target.closest?.('.ai-tools-action-btn-wrap')) ||
-                path.find((el) => el?.classList?.contains('ai-tools-action-btn-wrap'));
-            if (!wrap) return;
-
-            const btn =
-                (e.target && e.target.closest?.('.ai-tools-action-btn')) ||
-                path.find((el) => el?.classList?.contains('ai-tools-action-btn'));
-
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-
-            if (btn && typeof btn._aiTrigger === 'function') {
-                btn._aiTrigger(e);
-            }
-        }, true);
-    }
-
     function buildButtonGroup(wrapper, getText) {
         if (!wrapper) return;
 
@@ -1015,14 +941,6 @@ ${contentLabel}: "${postText}"`;
         const group = document.createElement('span');
         group.className = 'ai-tools-action-btn-wrap';
 
-        const blockEvent = (e) => {
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-        };
-        ['touchstart', 'touchend', 'touchcancel', 'pointerdown', 'pointerup', 'mousedown', 'mouseup'].forEach((evt) => {
-            group.addEventListener(evt, blockEvent, { passive: true });
-        });
-
         const getTruncatedText = () => {
             let t = getText() || '';
             if (t.length > 4000) t = t.substring(0, 4000) + '\n...[TRUNCATED FOR TOKEN EFFICIENCY]';
@@ -1031,29 +949,26 @@ ${contentLabel}: "${postText}"`;
 
         if (config.enableCopy) {
             const btn = UI.createActionButton('Copy post text', 'C');
-            btn._aiTrigger = () => {
-                const t = getText();
-                if (!t) return;
-                navigator.clipboard.writeText(t).then(() => {
-                    btn.textContent = '✓';
-                    setTimeout(() => { btn.textContent = 'C'; }, 1200);
-                });
-            };
+            btn.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const t = getText(); if (!t) return;
+                navigator.clipboard.writeText(t).then(() => { btn.textContent = '✓'; setTimeout(() => { btn.textContent = 'C'; }, 1200); });
+            });
             group.appendChild(btn);
         }
         if (config.enableTruth) {
             const btn = UI.createActionButton('Truth Meter', '✔');
-            btn._aiTrigger = () => Features.runAnalysis('truth', getTruncatedText(), btn);
+            btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); Features.runAnalysis('truth', getTruncatedText(), btn); });
             group.appendChild(btn);
         }
         if (config.enableExplain) {
             const btn = UI.createActionButton('Explain Post', 'e');
-            btn._aiTrigger = () => Features.runAnalysis('explain', getTruncatedText(), btn);
+            btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); Features.runAnalysis('explain', getTruncatedText(), btn); });
             group.appendChild(btn);
         }
         if (config.enableReply) {
             const btn = UI.createActionButton(`Generate ${REPLY_LABEL.name}`, 'R');
-            btn._aiTrigger = () => Features.openReplyGenerator(getTruncatedText(), btn);
+            btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); Features.openReplyGenerator(getTruncatedText(), btn); });
             group.appendChild(btn);
         }
 
@@ -1092,15 +1007,11 @@ ${contentLabel}: "${postText}"`;
                 this._injecting = true;
                 requestAnimationFrame(() => { this.injectButtons(); this._injecting = false; });
             });
-
-            observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
-
-            let checks = 0;
-            const fastInterval = setInterval(() => {
-                this.injectButtons();
-                checks++;
-                if (checks > 30) clearInterval(fastInterval);
-            }, 500);
+            
+            onBodyReady(() => {
+                observer.observe(document.body, { childList: true, subtree: true });
+                setTimeout(() => this.injectButtons(), 1000);
+            });
         },
         injectButtons() {
             if (!ADAPTER) return;
