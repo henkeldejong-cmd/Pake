@@ -1,3 +1,13 @@
+// ==UserScript==
+// @name         YouTube Lucky Pro + BelayTube Hub & Right Sidebar
+// @namespace    http://tampermonkey.net/
+// @version      8.2
+// @description  Full-featured YouTube desktop right-sidebar layout, BelayTube logo, lyrics, AI, and playlist tools.
+// @author       You
+// @match        *://*.youtube.com/*
+// @grant        none
+// ==/UserScript==
+
 (() => {
 'use strict';
 
@@ -119,6 +129,64 @@ function saveAiSettings() {
 
 /* ================= STYLES ================= */
 GM_addStyle(`
+  :root {
+    --yt-plugin-sidebar-w: ${localStorage.getItem('ytLucky_sidebarWidth') || '420'}px;
+  }
+
+  /* Top controls adjustment when sidebar is open */
+  body.yt-sidebar-open #yt-lucky-controls-v3-wrapper {
+    right: var(--yt-plugin-sidebar-w) !important;
+    width: calc(100% - var(--yt-plugin-sidebar-w)) !important;
+    transition: right 0.2s ease, width 0.2s ease;
+  }
+
+  /* Push YouTube content left when sidebar is open */
+  body.yt-sidebar-open {
+    margin-right: var(--yt-plugin-sidebar-w) !important;
+    box-sizing: border-box;
+  }
+
+  /* Right Sidebar Styles */
+  #yt-lucky-playlist-sidebar-v3 {
+    position: fixed !important;
+    top: var(--yt-plugin-bar-h, 40px) !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: auto !important;
+    width: var(--yt-plugin-sidebar-w) !important;
+    height: auto !important;
+    display: flex;
+    flex-direction: column;
+    background: rgba(18,18,18,0.98);
+    color: #fff;
+    padding: 6px 8px;
+    border-radius: 0 !important;
+    border-left: 1px solid #222;
+    z-index: 2147483645;
+    box-shadow: -4px 0 24px rgba(0,0,0,0.7);
+    font-size: 14px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  /* Left Edge Width Resize Handle */
+  .resize-handle-pl {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    width: 6px !important;
+    height: auto !important;
+    transform: none !important;
+    cursor: ew-resize !important;
+    background: rgba(255,255,255,0.06);
+    border-radius: 0 !important;
+    z-index: 20;
+  }
+  .resize-handle-pl:hover {
+    background: rgba(255,0,0,0.5);
+  }
+
   /* Top controls */
   #yt-lucky-controls-v3-wrapper {
     position: sticky;
@@ -265,7 +333,7 @@ GM_addStyle(`
     width: 100%;
     height: 100%;
     object-fit: cover;
-    object-position: center 48%; /* Crops excess top & bottom while centering the logo */
+    object-position: center 48%;
     pointer-events: none;
     user-select: none;
     display: block;
@@ -283,64 +351,6 @@ GM_addStyle(`
     #yt-lucky-banner-wrap {
       display: none !important;
     }
-  }
-
-  :root {
-    --yt-plugin-sidebar-w: ${localStorage.getItem('ytLucky_sidebarWidth') || '420'}px;
-  }
-
-  /* Top controls adjustment when sidebar is open */
-  body.yt-sidebar-open #yt-lucky-controls-v3-wrapper {
-    right: var(--yt-plugin-sidebar-w) !important;
-    width: calc(100% - var(--yt-plugin-sidebar-w)) !important;
-    transition: right 0.2s ease, width 0.2s ease;
-  }
-
-  /* Push YouTube content left when sidebar is open */
-  body.yt-sidebar-open {
-    margin-right: var(--yt-plugin-sidebar-w) !important;
-    box-sizing: border-box;
-  }
-
-  /* Right Sidebar Styles */
-  #yt-lucky-playlist-sidebar-v3 {
-    position: fixed !important;
-    top: var(--yt-plugin-bar-h, 40px) !important;
-    right: 0 !important;
-    bottom: 0 !important;
-    left: auto !important;
-    width: var(--yt-plugin-sidebar-w) !important;
-    height: auto !important;
-    display: flex;
-    flex-direction: column;
-    background: rgba(18,18,18,0.98);
-    color: #fff;
-    padding: 6px 8px;
-    border-radius: 0 !important;
-    border-left: 1px solid #222;
-    z-index: 2147483645;
-    box-shadow: -4px 0 24px rgba(0,0,0,0.7);
-    font-size: 14px;
-    box-sizing: border-box;
-    overflow: hidden;
-  }
-
-  /* Left Edge Width Resize Handle */
-  .resize-handle-pl {
-    position: absolute !important;
-    top: 0 !important;
-    left: 0 !important;
-    bottom: 0 !important;
-    width: 6px !important;
-    height: auto !important;
-    transform: none !important;
-    cursor: ew-resize !important;
-    background: rgba(255,255,255,0.06);
-    border-radius: 0 !important;
-    z-index: 20;
-  }
-  .resize-handle-pl:hover {
-    background: rgba(255,0,0,0.5);
   }
 
   /* BelayTube Logo Styles */
@@ -412,6 +422,14 @@ function setSafeDOM(container, htmlString) {
     while (doc.body.firstChild) container.appendChild(doc.body.firstChild);
   } catch(e) {
     console.warn('[YT Pro] safeDOM fallback:', e);
+  }
+}
+
+function updateSidebarVisibilityState(visible) {
+  if (visible) {
+    document.body.classList.add('yt-sidebar-open');
+  } else {
+    document.body.classList.remove('yt-sidebar-open');
   }
 }
 
@@ -515,15 +533,6 @@ function fixFullWidth() {
     if (tb) { tb.style.width = '100%'; tb.style.marginRight = '0'; tb.style.marginLeft = '0'; }
     return;
   }
-  
-function updateSidebarVisibilityState(visible) {
-  if (visible) {
-    document.body.classList.add('yt-sidebar-open');
-  } else {
-    document.body.classList.remove('yt-sidebar-open');
-  }
-}
-
   const targetCssWidth = window.innerWidth / z;
   const sb = document.getElementById('yt-lucky-playlist-sidebar-v3');
   if (sb) {
@@ -743,7 +752,6 @@ function buildMasterCSS() {
 
   if (t.hideHomeFeed) {
     css += `
-        /* ── Desktop YouTube ── */
         ytd-browse[page-subtype="home"] ytd-rich-grid-renderer,
         ytd-browse[page-subtype="home"] ytd-two-column-browse-results-renderer,
         ytd-browse[page-subtype="home"] #contents,
@@ -751,19 +759,13 @@ function buildMasterCSS() {
         ytd-browse[page-subtype="home"] ytd-rich-item-renderer,
         ytd-browse[page-subtype="home"] ytd-shelf-renderer,
         ytd-browse[page-subtype="home"] ytd-feed-filter-chip-bar-renderer ~ *,
-
-        /* ── Mobile YouTube: individual video cards ── */
         ytm-browse[page-subtype="home"] ytm-rich-item-renderer,
         ytm-browse[page-subtype="home"] ytm-media-item,
         ytm-browse[page-subtype="home"] ytm-video-with-context-renderer,
         ytm-browse[page-subtype="home"] ytm-compact-video-renderer,
         ytm-browse[page-subtype="home"] ytm-video-card-renderer,
-
-        /* ── Mobile YouTube: feed section containers ── */
         ytm-browse[page-subtype="home"] ytm-rich-section-renderer,
         ytm-browse[page-subtype="home"] ytm-rich-grid-renderer,
-
-        /* ── Mobile YouTube: fallback for feed containers (chips stay visible) ── */
         ytm-browse[page-subtype="home"] ytm-item-section-renderer:not(:has(yt-chip-cloud-chip-renderer)),
         ytm-browse[page-subtype="home"] lazy-list:not(:has(yt-chip-cloud-chip-renderer)) {
             display: none !important;
@@ -1087,143 +1089,137 @@ const YtLyrics = {
   },
 
   onVideoChange(vid, force = false) {
-  this.currentLyrics = [];
-  this.lineElements = [];
-  this.lastActiveIndex = -1;
-  // Allow a fresh fetch to start even if one was in progress
-  this.isFetching = false;
+    this.currentLyrics = [];
+    this.lineElements = [];
+    this.lastActiveIndex = -1;
+    this.isFetching = false;
 
-  const c = this.panelElement?.querySelector('#lyrics-content');
-  if (c) c.innerHTML = '<div class="lyrics-loading">Loading track lyrics...</div>';
+    const c = this.panelElement?.querySelector('#lyrics-content');
+    if (c) c.innerHTML = '<div class="lyrics-loading">Loading track lyrics...</div>';
 
-  if (vid !== this.currentVideoId || force) {
-    this.currentVideoId = vid;
-    this.fetchLyrics();
-  }
-},
+    if (vid !== this.currentVideoId || force) {
+      this.currentVideoId = vid;
+      this.fetchLyrics();
+    }
+  },
 
   onShow() {
-  const vid = new URLSearchParams(window.location.search).get('v');
-  if (vid && (vid !== this.currentVideoId || this.currentLyrics.length === 0)) {
-    this.currentVideoId = vid;
-    if (!this.isFetching) this.fetchLyrics();
-  } else if (this.lineElements.length > 0 && this.lastActiveIndex >= 0) {
-    // Lyrics already loaded — rescroll to the currently highlighted line
-    const c = this.panelElement.querySelector('#lyrics-content');
-    const target = this.lineElements[this.lastActiveIndex];
-    if (c && target) {
-      const off = target.offsetTop - (c.clientHeight / 2) + (target.clientHeight / 2);
-      c.scrollTo({ top: off, behavior: 'auto' });
+    const vid = new URLSearchParams(window.location.search).get('v');
+    if (vid && (vid !== this.currentVideoId || this.currentLyrics.length === 0)) {
+      this.currentVideoId = vid;
+      if (!this.isFetching) this.fetchLyrics();
+    } else if (this.lineElements.length > 0 && this.lastActiveIndex >= 0) {
+      const c = this.panelElement.querySelector('#lyrics-content');
+      const target = this.lineElements[this.lastActiveIndex];
+      if (c && target) {
+        const off = target.offsetTop - (c.clientHeight / 2) + (target.clientHeight / 2);
+        c.scrollTo({ top: off, behavior: 'auto' });
+      }
     }
-  }
-},
+  },
 
   async fetchLyrics(force = false) {
-  if (this.isFetching) return;
-  this.isFetching = true;
-  const fetchVid = this.currentVideoId;
+    if (this.isFetching) return;
+    this.isFetching = true;
+    const fetchVid = this.currentVideoId;
 
-  const content = this.panelElement?.querySelector('#lyrics-content');
-  if (content) content.innerHTML = '<div class="lyrics-loading">Searching lyrics...</div>';
+    const content = this.panelElement?.querySelector('#lyrics-content');
+    if (content) content.innerHTML = '<div class="lyrics-loading">Searching lyrics...</div>';
 
-  try {
-    // Robust multi-platform video title locator
-    let videoTitle = '';
-    const selectors = [
-      'h1.ytd-watch-metadata yt-formatted-string',
-      'h1.ytd-watch-metadata',
-      'h2.slim-video-metadata-title',
-      '.slim-video-metadata-title',
-      'ytm-slim-video-information-renderer .slim-video-information-title',
-      '.slim-video-information-title .yt-core-attributed-string',
-      'h1.title yt-formatted-string',
-      'h1.title'
-    ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el && el.textContent.trim()) {
-        videoTitle = el.textContent.trim();
-        break;
-      }
-    }
-    if (!videoTitle) {
-      const dt = document.title.replace(/\s*-\s*YouTube$/i, '').trim();
-      if (dt && dt.toLowerCase() !== 'youtube') videoTitle = dt;
-    }
-
-    // Treat placeholder titles as "not ready yet" and retry shortly
-    const isBadTitle =
-      !videoTitle ||
-      videoTitle.trim() === '' ||
-      videoTitle.toLowerCase() === 'youtube' ||
-      videoTitle.toLowerCase() === 'youtube studio';
-
-    if (isBadTitle) {
-      this.isFetching = false;
-      setTimeout(() => {
-        if (
-          this.currentVideoId === fetchVid &&
-          (!this.currentLyrics || this.currentLyrics.length === 0)
-        ) {
-          this.fetchLyrics();
-        }
-      }, 800);
-      return;
-    }
-
-    const songInfo = this.extractSongInfo(videoTitle);
-    let lyrics = null, source = null;
-
-    if (!this.useOtherApis) {
-      lyrics = await this.tryLRCLIB(songInfo);
-      if (lyrics && lyrics.length > 0) source = 'LRCLIB';
-    } else {
-      const pIdx = this.apiOrder.indexOf(this.preferredApi);
-      const ordered = [
-        this.apiOrder[pIdx],
-        ...this.apiOrder.slice(0, pIdx),
-        ...this.apiOrder.slice(pIdx + 1)
+    try {
+      let videoTitle = '';
+      const selectors = [
+        'h1.ytd-watch-metadata yt-formatted-string',
+        'h1.ytd-watch-metadata',
+        'h2.slim-video-metadata-title',
+        '.slim-video-metadata-title',
+        'ytm-slim-video-information-renderer .slim-video-information-title',
+        '.slim-video-information-title .yt-core-attributed-string',
+        'h1.title yt-formatted-string',
+        'h1.title'
       ];
-      const fns = {
-        'LRCLIB': this.tryLRCLIB.bind(this),
-        'Genius': this.tryGeniusAPI.bind(this),
-        'Lyrics.ovh': this.tryLyricsOVH.bind(this),
-        'Textyl.co': this.tryTextylAPI.bind(this),
-        'Some Random API': this.trySomeRandomAPI.bind(this)
-      };
-      for (const n of ordered) {
-        lyrics = await fns[n](songInfo);
-        if (lyrics && lyrics.length > 0) { source = n; break; }
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.textContent.trim()) {
+          videoTitle = el.textContent.trim();
+          break;
+        }
+      }
+      if (!videoTitle) {
+        const dt = document.title.replace(/\s*-\s*YouTube$/i, '').trim();
+        if (dt && dt.toLowerCase() !== 'youtube') videoTitle = dt;
+      }
+
+      const isBadTitle =
+        !videoTitle ||
+        videoTitle.trim() === '' ||
+        videoTitle.toLowerCase() === 'youtube' ||
+        videoTitle.toLowerCase() === 'youtube studio';
+
+      if (isBadTitle) {
+        this.isFetching = false;
+        setTimeout(() => {
+          if (
+            this.currentVideoId === fetchVid &&
+            (!this.currentLyrics || this.currentLyrics.length === 0)
+          ) {
+            this.fetchLyrics();
+          }
+        }, 800);
+        return;
+      }
+
+      const songInfo = this.extractSongInfo(videoTitle);
+      let lyrics = null, source = null;
+
+      if (!this.useOtherApis) {
+        lyrics = await this.tryLRCLIB(songInfo);
+        if (lyrics && lyrics.length > 0) source = 'LRCLIB';
+      } else {
+        const pIdx = this.apiOrder.indexOf(this.preferredApi);
+        const ordered = [
+          this.apiOrder[pIdx],
+          ...this.apiOrder.slice(0, pIdx),
+          ...this.apiOrder.slice(pIdx + 1)
+        ];
+        const fns = {
+          'LRCLIB': this.tryLRCLIB.bind(this),
+          'Genius': this.tryGeniusAPI.bind(this),
+          'Lyrics.ovh': this.tryLyricsOVH.bind(this),
+          'Textyl.co': this.tryTextylAPI.bind(this),
+          'Some Random API': this.trySomeRandomAPI.bind(this)
+        };
+        for (const n of ordered) {
+          lyrics = await fns[n](songInfo);
+          if (lyrics && lyrics.length > 0) { source = n; break; }
+        }
+      }
+
+      if (this.currentVideoId !== fetchVid) {
+        this.isFetching = false;
+        return;
+      }
+
+      if (lyrics && lyrics.length > 0) {
+        this.currentLyrics = this.cleanLyrics(lyrics);
+        if (this.panelElement) {
+          this.renderLyricsDOM();
+          const h = this.panelElement.querySelector('#lyrics-header-title');
+          if (h) h.textContent = `🎵 Lyrics (${source})`;
+        }
+      } else {
+        const msg = !this.useOtherApis
+          ? 'No lyrics found on LRCLIB.<br><span style="font-size:11px;opacity:0.75;">Click "🌐 Other: OFF" to enable more.</span>'
+          : 'No lyrics found.';
+        if (content) content.innerHTML = `<div class="lyrics-loading" style="color:#ff5252;">${msg}</div>`;
+      }
+    } catch (e) {
+      if (this.currentVideoId === fetchVid && content) {
+        content.innerHTML = '<div class="lyrics-loading" style="color:#ff5252;">Failed to load.</div>';
       }
     }
-
-    // Video changed mid-fetch? Abort so we don't show stale lyrics.
-    if (this.currentVideoId !== fetchVid) {
-      this.isFetching = false;
-      return;
-    }
-
-    if (lyrics && lyrics.length > 0) {
-      this.currentLyrics = this.cleanLyrics(lyrics);
-      if (this.panelElement) {
-        this.renderLyricsDOM();
-        const h = this.panelElement.querySelector('#lyrics-header-title');
-        if (h) h.textContent = `🎵 Lyrics (${source})`;
-      }
-    } else {
-      const msg = !this.useOtherApis
-        ? 'No lyrics found on LRCLIB.<br><span style="font-size:11px;opacity:0.75;">Click "🌐 Other: OFF" to enable more.</span>'
-        : 'No lyrics found.';
-      if (content) content.innerHTML = `<div class="lyrics-loading" style="color:#ff5252;">${msg}</div>`;
-    }
-  } catch (e) {
-    console.error(e);
-    if (this.currentVideoId === fetchVid && content) {
-      content.innerHTML = '<div class="lyrics-loading" style="color:#ff5252;">Failed to load.</div>';
-    }
-  }
-  this.isFetching = false;
-},
+    this.isFetching = false;
+  },
 
   renderLyricsDOM() {
     const content = this.panelElement.querySelector('#lyrics-content');
@@ -1267,59 +1263,55 @@ const YtLyrics = {
   },
 
   highlightLine(index, scroll = true) {
-        if (this.lastActiveIndex >= 0 && this.lineElements[this.lastActiveIndex]) {
-            this.lineElements[this.lastActiveIndex].classList.remove('karaoke-active');
-        }
-        this.lastActiveIndex = index;
-        const target = this.lineElements[index];
-        if (target) {
-            target.classList.add('karaoke-active');
-            if (scroll && !this.focusedMode) {
-                const c = this.panelElement?.querySelector('#lyrics-content');
-                if (c) {
-                    const off = target.offsetTop - (c.clientHeight / 2) + (target.clientHeight / 2);
-                    c.scrollTo({ top: off, behavior: 'smooth' });
-                }
+    if (this.lastActiveIndex >= 0 && this.lineElements[this.lastActiveIndex]) {
+        this.lineElements[this.lastActiveIndex].classList.remove('karaoke-active');
+    }
+    this.lastActiveIndex = index;
+    const target = this.lineElements[index];
+    if (target) {
+        target.classList.add('karaoke-active');
+        if (scroll && !this.focusedMode) {
+            const c = this.panelElement?.querySelector('#lyrics-content');
+            if (c) {
+                const off = target.offsetTop - (c.clientHeight / 2) + (target.clientHeight / 2);
+                c.scrollTo({ top: off, behavior: 'smooth' });
             }
         }
-    },
+    }
+  },
 
   syncKaraoke() {
-        if (!this.karaokeMode || this.currentLyrics.length === 0) return;
-        const v = document.querySelector('video');
-        if (!v || v.paused) return;
+    if (!this.karaokeMode || this.currentLyrics.length === 0) return;
+    const v = document.querySelector('video');
+    if (!v || v.paused) return;
 
-        const time = v.currentTime + this.syncOffset;
-        let activeIdx = -1;
+    const time = v.currentTime + this.syncOffset;
+    let activeIdx = -1;
 
-        // Rock-solid chronological match: find the last line that has started
-        for (let i = 0; i < this.currentLyrics.length; i++) {
-            const lineTime = this.currentLyrics[i].time;
-            if (lineTime !== undefined) {
-                if (time >= lineTime) {
-                    activeIdx = i;
-                } else {
-                    break;
-                }
+    for (let i = 0; i < this.currentLyrics.length; i++) {
+        const lineTime = this.currentLyrics[i].time;
+        if (lineTime !== undefined) {
+            if (time >= lineTime) {
+                activeIdx = i;
+            } else {
+                break;
             }
         }
+    }
 
-        if (activeIdx !== -1 && activeIdx !== this.lastActiveIndex) {
-            this.highlightLine(activeIdx, true);
-        }
-    },
+    if (activeIdx !== -1 && activeIdx !== this.lastActiveIndex) {
+        this.highlightLine(activeIdx, true);
+    }
+  },
 
-    startKaraokeLoop() {
-        if (this.karaokeRaf) cancelAnimationFrame(this.karaokeRaf);
-
-        const loop = () => {
-            try {
-                this.syncKaraoke();
-            } catch (_) {}
-            this.karaokeRaf = requestAnimationFrame(loop);
-        };
+  startKaraokeLoop() {
+    if (this.karaokeRaf) cancelAnimationFrame(this.karaokeRaf);
+    const loop = () => {
+        try { this.syncKaraoke(); } catch (_) {}
         this.karaokeRaf = requestAnimationFrame(loop);
-    },
+    };
+    this.karaokeRaf = requestAnimationFrame(loop);
+  },
 
   cleanLyrics(arr) {
     if (arr.length > 0 && arr[0].text && arr[0].text.includes('Contributors')) arr.shift();
@@ -3144,7 +3136,6 @@ function updateAudioOverlay(index) {
       <div style="font-size:13px; color:#aaa; margin-bottom:8px; font-weight:500;">Searching lyrics...</div>
       <div style="font-size:36px; animation:audio-glow 2s infinite alternate; color:#fff;">♫</div>
     `;
-    // Fetch lyrics independently if not already in progress
     if (!YtLyrics.isFetching) {
       YtLyrics.fetchLyrics();
     }
@@ -3181,25 +3172,6 @@ function updateAudioOverlay(index) {
 
 window._ytAudioOverlayUpdate = updateAudioOverlay;
 
-let _audioOverlaySyncInterval = null;
-
-function syncAudioOverlay() {
-    const overlay = document.getElementById('yt-lucky-audio-overlay');
-    if (!overlay || !isAudioMode) return;
-    const video = document.querySelector('video');
-    if (!video) return;
-    const rect = video.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-        overlay.style.top = rect.top + 'px';
-        overlay.style.left = rect.left + 'px';
-        overlay.style.width = rect.width + 'px';
-        overlay.style.height = rect.height + 'px';
-    }
-}
-
-// ==========================================
-// AUDIO MODE (Ambient Dark Cover + Glowing ♫)
-// ==========================================
 function toggleAudioMode() {
     isAudioMode = !isAudioMode;
     const audioBtn = document.getElementById('yt-lucky-audio-btn');
@@ -3217,7 +3189,6 @@ function toggleAudioMode() {
     let overlay = document.getElementById('yt-lucky-audio-overlay');
 
     if (isAudioMode) {
-        // Lower quality to save mobile bandwidth
         if (player && typeof player.getAvailableQualityLevels === 'function') {
             const levels = player.getAvailableQualityLevels();
             if (levels && levels.length) {
@@ -3238,7 +3209,6 @@ function toggleAudioMode() {
             if (pos === 'static') playerContainer.style.position = 'relative';
         }
 
-        // Flawlessly fills the video box regardless of zoom or orientation
         overlay.style.cssText = `
             position: absolute !important;
             inset: 0 !important;
@@ -3263,7 +3233,6 @@ function toggleAudioMode() {
 
         if (video && video.paused) video.play().catch(() => {});
     } else {
-        // Restore normal video playback
         if (player && typeof player.setPlaybackQualityRange === 'function') {
             player.setPlaybackQualityRange('default', 'default');
         } else if (player && typeof player.setPlaybackQuality === 'function') {
@@ -3450,11 +3419,9 @@ function scrollToActiveTrack(smooth = true) {
   const el = lc.querySelector('.yt-lucky-active-item');
   if (!el) return;
 
-  // 1. Identify the scrollable container (column in multi-list mode, or lc in single mode)
   const col = el.closest('.yt-lucky-pdisplay-col');
   const container = col || lc;
 
-  // 2. Exact vertical centering calculation
   const elRect = el.getBoundingClientRect();
   const containerRect = container.getBoundingClientRect();
 
@@ -3462,13 +3429,11 @@ function scrollToActiveTrack(smooth = true) {
   const targetRelativeTop = (container.clientHeight / 2) - (el.clientHeight / 2);
   const deltaY = currentRelativeTop - targetRelativeTop;
 
-  // Clamping is automatically handled by the browser (stops at 0 or max scroll)
   container.scrollTo({
     top: container.scrollTop + deltaY,
     behavior: smooth ? 'smooth' : 'auto'
   });
 
-  // 3. In multi-list mode, ensure the active column is horizontally in view
   if (col && lc) {
     const colRect = col.getBoundingClientRect();
     const lcRect = lc.getBoundingClientRect();
@@ -3543,27 +3508,13 @@ window._ytLuckyApplyScale = function(scale) {
   const sb = document.getElementById('yt-lucky-playlist-sidebar-v3');
   if (!sb) return;
   scale = Math.max(0.7, Math.min(1.25, scale));
-  let visualH = sb.getBoundingClientRect().height;
-  if (!visualH) visualH = (cfg.ui.luckyHeightVh || 45) / 100 * window.innerHeight;
-  const maxVisualH = window.innerHeight - 20;
-  visualH = Math.min(visualH, maxVisualH);
   sb.style.zoom = scale;
   sb._luckyScale = scale;
-  sb.style.height = (visualH / scale) + 'px';
-  localStorage.setItem('ytLucky_sidebarHeightPx', visualH);
-  localStorage.setItem('ytLucky_sidebarHeightBottom', (visualH / window.innerHeight * 100).toFixed(1) + 'vh');
   fixFullWidth();
 };
 
 window._ytLuckyApplyHeight = function(vh) {
-  const sb = document.getElementById('yt-lucky-playlist-sidebar-v3');
-  if (!sb) return;
-  vh = Math.max(25, Math.min(80, vh));
-  const scale = sb._luckyScale || 1;
-  const visualPx = (vh / 100) * window.innerHeight;
-  sb.style.height = (visualPx / scale) + 'px';
-  localStorage.setItem('ytLucky_sidebarHeightPx', visualPx);
-  localStorage.setItem('ytLucky_sidebarHeightBottom', vh + 'vh');
+  // Not used in right-sidebar layout but kept for compatibility
 };
 
 function switchSidebarView(view) {
@@ -3572,6 +3523,7 @@ function switchSidebarView(view) {
   if (sb.style.display === 'none') {
     sb.style.display = 'flex';
     savePlaylistVisible(true);
+    updateSidebarVisibilityState(true);
     const b = Array.from(document.querySelectorAll('#yt-lucky-controls-v3-wrapper button')).find(x => x.textContent.includes('List:'));
     if (b) b.textContent = 'List: Hide';
   }
@@ -3613,19 +3565,6 @@ function switchSidebarView(view) {
       p.style.display = 'flex';
     }
   }
-
-  const bPlistBtn = Array.from(document.querySelectorAll('#yt-lucky-controls-v3-wrapper button')).find(b => b.textContent === 'B-Plist');
-  const lyricsBtn = Array.from(document.querySelectorAll('#yt-lucky-controls-v3-wrapper button')).find(b => b.textContent === '🎵 Lyrics');
-  const aiexBtn = document.getElementById('yt-lucky-aiex-btn');
-  const aiSettingsBtn = document.getElementById('yt-lucky-aisettings-btn');
-  
-  if (bPlistBtn) bPlistBtn.style.background = (view === 'POTPLAYER') ? '#8e24aa' : '#e64a19';
-  if (aiexBtn) aiexBtn.style.background = (view === 'AIEX') ? '#8e24aa' : '#0288d1';
-  if (aiSettingsBtn) aiSettingsBtn.style.background = (view === 'AISETTINGS') ? '#8e24aa' : '#455a64';
-  if (lyricsBtn) {
-    lyricsBtn.style.background = (view === 'LYRICS') ? '#8e24aa' : '#f1f8e9';
-    lyricsBtn.style.color = (view === 'LYRICS') ? '#fff' : '#000';
-  }
 }
 
 function createPlaylistSidebar() {
@@ -3648,7 +3587,7 @@ function createPlaylistSidebar() {
     
     const onMove = me => {
       const cx = me.touches ? me.touches[0].clientX : me.clientX;
-      const deltaX = startX - cx; // dragging left increases width
+      const deltaX = startX - cx;
       const newW = Math.max(300, Math.min(900, startW + deltaX));
       sb.style.width = newW + 'px';
       document.documentElement.style.setProperty('--yt-plugin-sidebar-w', newW + 'px');
@@ -3668,52 +3607,12 @@ function createPlaylistSidebar() {
   rh.addEventListener('mousedown', startResize);
   rh.addEventListener('touchstart', startResize, { passive: false });
   sb.appendChild(rh);
-  
-  const startResize = e => {
-    e.preventDefault();
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    const startVisualH = sb.getBoundingClientRect().height;
-    const startY = clientY;
-    
-    const onMove = me => {
-      const cy = me.touches ? me.touches[0].clientY : me.clientY;
-      const s = sb._luckyScale || 1;
-      const deltaVisual = startY - cy;
-      const newVisual = startVisualH + deltaVisual;
-      const maxVisual = window.innerHeight - 20;
-      const minVisual = 150;
-      
-      if (newVisual > minVisual && newVisual <= maxVisual) {
-        sb.style.height = (newVisual / s) + 'px';
-        localStorage.setItem('ytLucky_sidebarHeightPx', newVisual);
-        localStorage.setItem('ytLucky_sidebarHeightBottom', (newVisual / window.innerHeight * 100).toFixed(1) + 'vh');
-      }
-    };
-    
-    const onEnd = () => {
-      localStorage.setItem('ytLucky_sidebarHeightBottom', (sb.getBoundingClientRect().height / window.innerHeight * 100).toFixed(1) + 'vh');
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('touchmove', onMove);
-      document.removeEventListener('mouseup', onEnd);
-      document.removeEventListener('touchend', onEnd);
-    };
-    
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('touchmove', onMove, { passive: false });
-    document.addEventListener('mouseup', onEnd);
-    document.addEventListener('touchend', onEnd);
-  };
-  
-  rh.addEventListener('mousedown', startResize);
-  rh.addEventListener('touchstart', startResize, { passive: false });
-  sb.appendChild(rh);
   document.documentElement.appendChild(sb);
 
   // Header
   const header = document.createElement('div');
   header.style.cssText = 'display:flex;align-items:center;gap:3px;margin-bottom:4px;padding-right:4px;flex-shrink:0;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;position:relative;z-index:10;';
   
-  // 🎵 Title icon - Tapping re-centers active song immediately
   const hTitle = document.createElement('div');
   hTitle.textContent = '🎵';
   hTitle.title = 'Re-center active song';
