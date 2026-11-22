@@ -1,0 +1,36 @@
+name: Build My Custom Reddit App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "reddit-plugins/**"
+      - ".github/workflows/build-reddit.yml"
+  workflow_dispatch:
+
+jobs:
+  build-reddit-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Setup Pake environment
+        uses: ./.github/actions/setup-env
+        with:
+          mode: build
+
+      - name: Build Pake CLI
+        run: pnpm run cli:build
+
+      - name: Build Custom Reddit MSI
+        run: node dist/cli.js https://www.reddit.com --name "Reddit" --identifier com.pake.reddit.custom --width 1200 --height 800 --new-window --no-restore-last-url --inject ./reddit-plugins/all-in-one-toolkit.js --inject ./reddit-plugins/explainx.js --inject ./reddit-plugins/inline-summaries.js --inject ./reddit-plugins/post-tools.js --inject ./reddit-plugins/reddit-post-viewer.js --inject ./reddit-plugins/reddit-pro.js
+
+      - name: Upload Reddit MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-reddit-msi
+          path: "*.msi"
+          if-no-files-found: error
