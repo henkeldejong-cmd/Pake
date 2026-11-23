@@ -27,15 +27,30 @@
     'use strict';
 
     /* ====================
-       Desktop App GM_* Polyfills (Tauri IPC + Storage + Styles)
+       Desktop App GM_* Polyfills (YouTube Plugin Method + Pake Proxy Fallback)
        ==================== */
+    const __PAKE_INVOKE__ =
+        (typeof __TAURI__ !== 'undefined' && __TAURI__?.core?.invoke) ||
+        window.__TAURI__?.core?.invoke ||
+        window.__TAURI_INTERNALS__?.invoke ||
+        null;
+
+    if (typeof GM_addStyle === 'undefined') {
+        window.GM_addStyle = css => {
+            const s = document.createElement('style');
+            s.textContent = css;
+            (document.head || document.documentElement).appendChild(s);
+            return s;
+        };
+    }
+
     if (typeof GM_getValue === 'undefined') {
         window.GM_getValue = (k, d) => {
             try {
                 const r = localStorage.getItem(k);
                 if (r === null) return d;
-                try { return JSON.parse(r); } catch(_) { return r; }
-            } catch(_) { return d; }
+                try { return JSON.parse(r); } catch (_) { return r; }
+            } catch (_) { return d; }
         };
     }
 
@@ -43,13 +58,13 @@
         window.GM_setValue = (k, v) => {
             try {
                 localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
-            } catch(_) {}
+            } catch (_) {}
         };
     }
 
     if (typeof GM_deleteValue === 'undefined') {
         window.GM_deleteValue = (k) => {
-            try { localStorage.removeItem(k); } catch(_) {}
+            try { localStorage.removeItem(k); } catch (_) {}
         };
     }
 
@@ -57,92 +72,63 @@
         window.GM_registerMenuCommand = () => {};
     }
 
-    if (typeof GM_addStyle === 'undefined') {
-        window.GM_addStyle = (css) => {
-            const style = document.createElement('style');
-            style.textContent = css;
-            (document.head || document.documentElement).appendChild(style);
-            return style;
-        };
-    }
+    // Override with YouTube Plugin fetch() method + Rust proxy_http fallback for strict-CSP sites
+    window.GM_xmlhttpRequest = opts => {
+        const ctrl = new AbortController();
+        const to = opts.timeout ? setTimeout(() => ctrl.abort(), opts.timeout) : null;
+        const init = { method: opts.method || 'GET', headers: opts.headers || {}, signal: ctrl.signal };
+        if (opts.data) init.body = opts.data;
 
-    // Tauri IPC-backed GM_xmlhttpRequest to bypass CORS & strict CSP across all websites
-    if (typeof GM_xmlhttpRequest === 'undefined') {
-        window.GM_xmlhttpRequest = (details) => {
-            if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-                let headersObj = {};
-                if (details.headers) {
-                    if (details.headers instanceof Headers) {
-                        details.headers.forEach((v, k) => { headersObj[k] = v; });
-                    } else {
-                        headersObj = details.headers;
-                    }
-                }
-
-                window.__TAURI__.core.invoke('tauri_ai_proxy', {
-                    url: details.url,
-                    method: details.method || "GET",
-                    headers: headersObj,
-                    body: details.data || null
-                })
-                .then(rawRes => {
-                    const res = JSON.parse(rawRes);
-                    let response = res.responseText;
-                    if (details.responseType === "json") {
-                        try { response = JSON.parse(res.responseText); } catch (e) { response = null; }
-                    }
-                    if (details.onload) {
-                        details.onload({
-                            status: res.status,
-                            statusText: res.status === 200 ? "OK" : "Error",
-                            finalUrl: details.url,
-                            responseText: res.responseText,
-                            response: response,
-                            responseHeaders: ""
-                        });
-                    }
-                })
-                .catch(err => {
-                    if (details.onerror) details.onerror(err);
-                });
-
-                return { abort: () => {} };
+        const deliver = (status, statusText, text, finalUrl) => {
+            let payload = text;
+            if (opts.responseType === 'json') {
+                try { payload = JSON.parse(text); } catch (_) { payload = null; }
             }
-
-            // Standard Fetch Fallback if Tauri IPC isn't active
-            const controller = new AbortController();
-            const to = details.timeout ? setTimeout(() => controller.abort(), details.timeout) : null;
-            fetch(details.url, {
-                method: details.method || "GET",
-                headers: details.headers || {},
-                body: details.data || undefined,
-                signal: controller.signal,
-            })
-                .then(async (res) => {
-                    if (to) clearTimeout(to);
-                    const responseText = await res.text();
-                    let response = responseText;
-                    if (details.responseType === "json") {
-                        try { response = JSON.parse(responseText); } catch (e) { response = null; }
-                    }
-                    if (details.onload) {
-                        details.onload({
-                            status: res.status,
-                            statusText: res.statusText,
-                            finalUrl: res.url,
-                            responseText,
-                            response,
-                            responseHeaders: [...res.headers.entries()].map(([k, v]) => `${k}: ${v}`).join("\r\n"),
-                        });
-                    }
-                })
-                .catch((err) => {
-                    if (to) clearTimeout(to);
-                    if (details.onerror) details.onerror(err);
+            if (opts.onload) {
+                opts.onload({
+                    status,
+                    statusText,
+                    responseText: text,
+                    response: payload,
+                    finalUrl: finalUrl || opts.url,
+                    readyState: 4
                 });
-            return { abort: () => controller.abort() };
+            }
         };
-    }
+
+        fetch(opts.url, init)
+            .then(res => {
+                if (to) clearTimeout(to);
+                return res.text().then(text => deliver(res.status, res.statusText, text, res.url));
+            })
+            .catch(err => {
+                if (to) clearTimeout(to);
+                if (err.name === 'AbortError') {
+                    if (opts.ontimeout) opts.ontimeout();
+                    return;
+                }
+                // Fallback to Rust proxy_http when a site's CSP/CORS blocks browser fetch()
+                if (__PAKE_INVOKE__) {
+                    __PAKE_INVOKE__('proxy_http', {
+                        req: {
+                            url: opts.url,
+                            method: opts.method || 'GET',
+                            headers: opts.headers || {},
+                            body: typeof opts.data === 'string' ? opts.data : (opts.data != null ? String(opts.data) : null)
+                        }
+                    })
+                    .then(r => deliver(r.status, r.statusText, r.responseText, r.finalUrl))
+                    .catch(proxyErr => {
+                        console.error('[ExplainX proxy_http error]', proxyErr);
+                        if (opts.onerror) opts.onerror(proxyErr);
+                    });
+                } else {
+                    if (opts.onerror) opts.onerror(err);
+                }
+            });
+
+        return { abort: () => ctrl.abort() };
+    };
 
     // --- STATE & CONFIGURATION ---
     let conversationHistory = [];
@@ -238,7 +224,7 @@
         let loaded = {};
 
         if (raw) {
-            try { loaded = JSON.parse(raw); } catch (e) { console.warn('ExplainX: Could not parse JSON settings'); }
+            try { loaded = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) { console.warn('ExplainX: Could not parse JSON settings'); }
         } else {
             loaded = await GM_getValue('explainX_settings') || {};
         }
@@ -1363,5 +1349,6 @@
     }
 
     if (document.readyState === 'complete') { main(); } else { window.addEventListener('load', main); }
+
 
 })();
