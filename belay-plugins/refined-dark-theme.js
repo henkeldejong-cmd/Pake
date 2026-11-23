@@ -2,23 +2,31 @@
   'use strict';
   if (window.__refinedDark) return;
   window.__refinedDark = true;
+
   const KEY = '__refined_dark_on';
-  const isOn = () => { try { return localStorage.getItem(KEY) !== '0'; } catch (e) { return true; } };
+  const SKIP_KEY = '__refined_dark_skip_hosts';
+  const getSkipped = () => { try { return JSON.parse(localStorage.getItem(SKIP_KEY) || '[]'); } catch (e) { return []; } };
+  const isHostSkipped = () => getSkipped().includes(location.hostname);
+  const toggleHostSkip = () => {
+    const list = getSkipped();
+    const idx = list.indexOf(location.hostname);
+    if (idx >= 0) list.splice(idx, 1); else list.push(location.hostname);
+    try { localStorage.setItem(SKIP_KEY, JSON.stringify(list)); } catch (e) {}
+  };
+  const isOn = () => { try { return localStorage.getItem(KEY) !== '0' && !isHostSkipped(); } catch (e) { return true; } };
   const saveOn = v => { try { localStorage.setItem(KEY, v ? '1' : '0'); } catch (e) {} };
 
-  /* ---------------- Config ---------------- */
   const CFG = {
-    pageBg: '#0a0a0c',        // base surface (deep, slightly cool near-black)
-    minSurface: 0.045,        // HSL lightness of what pure white becomes
-    surfaceRange: 0.20,       // how much lighter "light grays" end up (keeps layering)
-    dimImages: 0.92,          // 1 = off; slight dimming of images
-    disqus: 'invert',         // 'invert' = force dark via filter (photos look negative) | 'native' = ask Disqus for its dark theme (ignored on some sites) | 'off'
-    skipHosts: [],            // e.g. ['youtube.com'] to leave alone
-    batch: 350                // elements per frame
+    pageBg: '#0a0a0c',
+    minSurface: 0.045,
+    surfaceRange: 0.20,
+    dimImages: 0.92,
+    disqus: 'invert',
+    skipHosts: ['archive.org'], // Heavy complex readers/apps can be listed here or toggled with Ctrl+Shift+D
+    batch: 250
   };
-  if (CFG.skipHosts.some(h => location.hostname.endsWith(h))) return;
+  if (CFG.skipHosts.some(h => location.hostname === h || location.hostname.endsWith('.' + h))) return;
 
-  /* ---------------- Instant base layer (prevents white flash) ---------------- */
   const base = document.createElement('style');
   base.id = '__refined-dark-base';
   base.textContent = `
@@ -34,7 +42,6 @@
   `;
   const mountBase = () => { if (!base.isConnected) (document.head || document.documentElement).appendChild(base); };
 
-  /* ---------------- Color helpers ---------------- */
   const cache = new Map();
   let ctx2d = null;
   function parse(str) {
@@ -44,7 +51,7 @@
     if (str === 'transparent') out = [0, 0, 0, 0];
     else {
       let m = str.match(/^rgba?\(([^)]+)\)/);
-      if (!m) { // oklch(), color(), lab()... normalise through canvas
+      if (!m) {
         try {
           ctx2d = ctx2d || document.createElement('canvas').getContext('2d');
           ctx2d.fillStyle = '#000'; ctx2d.fillStyle = str;
@@ -90,17 +97,15 @@
   }
   const css = (rgb, a) => a < 1 ? `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})` : `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
 
-  /* Light surface -> dark surface (hue kept, saturation tamed) */
   function mapSurface(c) {
     const [r, g, b, a] = c;
     if (a < 0.05) return null;
     const [h, s, l] = toHsl(r, g, b);
-    if (lum(r, g, b) < 0.55) return null;           // already dark / strongly coloured
-    if (s > 0.45 && l < 0.8) return null;           // saturated brand colour: keep
+    if (lum(r, g, b) < 0.55) return null;
+    if (s > 0.45 && l < 0.8) return null;
     const nl = CFG.minSurface + (1 - l) * CFG.surfaceRange * 1.6;
     return css(fromHsl(h, Math.min(s, 0.35), Math.min(nl, 0.22)), a);
   }
-  /* Dark text -> light text */
   function mapText(c) {
     const [r, g, b, a] = c;
     if (a < 0.05 || lum(r, g, b) > 0.6) return null;
@@ -114,9 +119,8 @@
     return css(fromHsl(h, Math.min(s, 0.25), 0.18 + (1 - l) * 0.25), a);
   }
 
-  /* ---------------- Per-element processing ---------------- */
-  const bgLum = new WeakMap();      // effective background luminance seen by an element's text
-  const applied = new WeakMap();    // el -> [[prop, prevValue, prevPriority], ...]
+  const bgLum = new WeakMap();
+  const applied = new WeakMap();
   const BORDERS = ['top', 'right', 'bottom', 'left'];
   const DEFAULT_LUM = lum(10, 10, 12);
 
@@ -146,17 +150,21 @@
     let cs;
     try { cs = getComputedStyle(el); } catch (e) { return parentLum; }
 
-    /* --- background colour --- */
+    // Skip invisible full-screen preloaders/overlays so they never turn into opaque black walls
+    if (cs.position === 'fixed' && (parseFloat(cs.opacity) < 0.15 || cs.pointerEvents === 'none')) {
+      bgLum.set(el, parentLum);
+      return parentLum;
+    }
+
     let eff = parentLum;
     const bg = parse(cs.backgroundColor);
     if (bg && bg[3] > 0.05) {
       const m = mapSurface(bg);
       if (m) setImp(el, 'background-color', m);
       const fin = parse(m || cs.backgroundColor);
-      if (bg[3] >= 0.6) eff = lum(fin[0], fin[1], fin[2]);
+      if (fin && bg[3] >= 0.6) eff = lum(fin[0], fin[1], fin[2]);
     }
 
-    /* --- gradients: remap every light colour stop --- */
     const bi = cs.backgroundImage;
     if (bi && bi !== 'none') {
       if (bi.includes('gradient')) {
@@ -167,18 +175,17 @@
           return m || s;
         });
         if (changed) { setImp(el, 'background-image', nbi); eff = DEFAULT_LUM + 0.05; }
-        else eff = null;
-      } else eff = null;       // photo / url() background: contrast unknown, leave text alone
+      } else if (bi.includes('url(')) {
+        eff = null;
+      }
     }
 
-    /* --- text colour --- */
     if (eff !== null && eff < 0.4) {
       const tc = parse(cs.color);
       const m = tc && mapText(tc);
       if (m) setImp(el, 'color', m);
     }
 
-    /* --- borders --- */
     for (const side of BORDERS) {
       if (parseFloat(cs['border' + side[0].toUpperCase() + side.slice(1) + 'Width']) > 0) {
         const bc = parse(cs['border' + side[0].toUpperCase() + side.slice(1) + 'Color']);
@@ -187,7 +194,6 @@
       }
     }
 
-    /* --- SVG icons / shapes --- */
     if (el instanceof SVGElement && tag !== 'svg' && eff !== null && eff < 0.4) {
       for (const p of ['fill', 'stroke']) {
         const c = parse(cs[p]);
@@ -196,7 +202,6 @@
       }
     }
 
-    /* --- native widgets --- */
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
       const c = parse(cs.backgroundColor);
       if (c && c[3] < 0.05) setImp(el, 'background-color', '#15151a');
@@ -206,7 +211,6 @@
     return eff;
   }
 
-  /* ---------------- Scheduling ---------------- */
   const queue = [];
   const queued = new Set();
   let scheduled = false;
@@ -235,19 +239,13 @@
     if (queue.length) schedule();
   }
 
+  // Only watch newly added elements (removes attribute-class thrashing that froze heavy sites)
   const mo = new MutationObserver(muts => {
     for (const m of muts) {
       if (m.type === 'childList') m.addedNodes.forEach(n => { markSeen(n); enqueue(n, true); });
-      else if (m.type === 'attributes' && m.target.nodeType === 1) {
-        // class changed (theme switch, state change): drop our overrides and recompute
-        reset(m.target);
-        m.target.querySelectorAll('*').forEach(c => { reset(c); });
-        enqueue(m.target, true);
-      }
     }
   });
 
-  /* ---- Disqus (cross-origin iframe): it chooses its theme once, from the host text colour ---- */
   const seen = new WeakSet();
   const disqusFrames = () => Array.from(document.querySelectorAll('iframe[src*="disqus.com"]'));
   function markSeen(n) {
@@ -255,15 +253,13 @@
     if (n.tagName === 'IFRAME') seen.add(n);
     else n.querySelectorAll && n.querySelectorAll('iframe').forEach(f => seen.add(f));
   }
-  function reinsert(f) {   // re-inserting an iframe forces it to reload and re-detect the theme
+  function reinsert(f) {
     const p = f.parentNode; if (!p) return;
     const nx = f.nextSibling; p.removeChild(f); p.insertBefore(f, nx);
   }
   function fixDisqus() {
     disqusFrames().forEach(f => { if (!seen.has(f)) { seen.add(f); reinsert(f); } });
   }
-
-  /* Disqus picks its dark theme from the host text colour: make #disqus_thread and its ancestors light-text */
   function prepNative() {
     if (CFG.disqus !== 'native') return;
     const t = document.getElementById('disqus_thread');
@@ -272,19 +268,16 @@
       if (!applied.get(el) || !applied.get(el).some(x => x[0] === 'color')) setImp(el, 'color', '#ececf0');
     }
   }
+
   let active = false;
   function enable() {
     if (active) return;
     active = true;
     mountBase();
-    mo.observe(document.documentElement, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['class']
-    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
     enqueue(document.documentElement, true);
     prepNative();
     if (CFG.disqus === 'native') fixDisqus();
-    console.log('[RefinedDark] enabled on', location.hostname, window === window.top ? '(top frame)' : '(sub frame)', 'disqus mode:', CFG.disqus);
-    setTimeout(() => console.log('[RefinedDark] disqus iframes found:', disqusFrames().length), 4000);
   }
   function disable() {
     active = false;
@@ -296,23 +289,27 @@
   }
 
   function toast(msg) {
-    // Check if the toast has already been shown in this app session
-    if (sessionStorage.getItem('__rd_toast_shown')) return;
-    sessionStorage.setItem('__rd_toast_shown', '1');
-
     const t = document.createElement('div');
     t.textContent = msg;
-    t.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:#222;color:#fff;' +
-      'padding:10px 16px;border-radius:20px;font:14px sans-serif;z-index:2147483647;opacity:.95';
+    t.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:#222;color:#fff;padding:8px 14px;border-radius:20px;font:13px sans-serif;z-index:2147483647;opacity:.95';
     (document.body || document.documentElement).appendChild(t);
     setTimeout(() => t.remove(), 1400);
   }
+
+  // Ctrl+Shift+D toggles dark mode off/on for the current website
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'd') {
+      e.preventDefault();
+      toggleHostSkip();
+      if (active) { disable(); toast('Dark mode OFF for ' + location.hostname); }
+      else { enable(); toast('Dark mode ON for ' + location.hostname); }
+    }
+  });
 
   if (isOn()) enable();
   document.addEventListener('DOMContentLoaded', () => { if (active) enqueue(document.documentElement, true); });
   window.addEventListener('load', () => { if (active) enqueue(document.documentElement, true); });
 
-  // Tap the plugin entry = toggle dark mode
   if (typeof hcj !== 'undefined' && hcj.on) {
     hcj.on('action', () => {
       if (active) { disable(); saveOn(false); toast('Dark mode off'); }
