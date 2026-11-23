@@ -16,6 +16,7 @@ fn main() {
             "set_title_bar_color",
             "quit_app",
             "reveal_download",
+            "proxy_http",
         ]),
     ))
     .expect("Failed to build Pake permissions")
