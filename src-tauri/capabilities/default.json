@@ -3,6 +3,9 @@
   "identifier": "pake-capability",
   "description": "Capability for the pake app.",
   "webviews": ["pake", "pake-*"],
+  "remote": {
+    "urls": ["https://*:*", "http://*:*"]
+  },
   "permissions": [
     "allow-download-file",
     "allow-send-notification",
@@ -17,6 +20,7 @@
     "allow-set-title-bar-color",
     "allow-quit-app",
     "allow-reveal-download",
+    "allow-proxy-http",
     "shell:allow-open",
     "core:window:allow-theme",
     "core:window:allow-start-dragging",
