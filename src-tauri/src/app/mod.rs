@@ -12,7 +12,7 @@ pub mod download;
 pub mod extensions;
 #[cfg(target_os = "linux")]
 pub mod header_bar;
-pub mod invoke;
+pub mod invoke; pub mod proxy;
 #[cfg(target_os = "linux")]
 pub mod media_permission;
 #[cfg(target_os = "macos")]
