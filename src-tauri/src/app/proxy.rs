@@ -1,30 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const PLUGIN_API_ALLOWLIST: &[&str] = &[
-    "generativelanguage.googleapis.com",
-    "openrouter.ai",
-    "api.groq.com",
-    "api.cerebras.ai",
-    "api.elevenlabs.io",
-    "r.jina.ai",
-    "api.fxtwitter.com",
-    "fxtwitter.com",
-    "vxtwitter.com",
-    "api.voicerss.org",
-    "texttospeech.googleapis.com",
-    "translate.google.com",
-    "speech.platform.bing.com",
-    "lrclib.net",
-    "lyrics.ovh",
-    "api.textyl.co",
-    "some-random-api.com",
-    "api.genius.com",
-    "genius.com",
-    "itunes.apple.com",
-    "app.grayswan.ai",
-];
-
 #[derive(Deserialize)]
 pub struct ProxyHttpRequest {
     pub url: String,
@@ -46,16 +22,15 @@ pub struct ProxyHttpResponse {
 #[tauri::command]
 pub async fn proxy_http(req: ProxyHttpRequest) -> Result<ProxyHttpResponse, String> {
     let parsed = reqwest::Url::parse(&req.url).map_err(|e| e.to_string())?;
-    let host = parsed.host_str().unwrap_or("");
-    let allowed = PLUGIN_API_ALLOWLIST
-        .iter()
-        .any(|domain| host == *domain || host.ends_with(&format!(".{}", domain)));
-
-    if !allowed {
-        return Err(format!("Blocked non-allowlisted domain: {}", host));
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Only http/https URLs are allowed".to_string());
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| e.to_string())?;
+
     let method = req
         .method
         .as_deref()
