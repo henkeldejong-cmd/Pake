@@ -1,4 +1,10 @@
-// --- Pake / WebView Compatibility Shim for Belay Homepage ---
+// --- Pake / WebView Compatibility Shim ---
+const __PAKE_INVOKE__ =
+  (typeof __TAURI__ !== "undefined" && __TAURI__?.core?.invoke) ||
+  window.__TAURI__?.core?.invoke ||
+  window.__TAURI_INTERNALS__?.invoke ||
+  null;
+
 window.unsafeWindow = window;
 
 function GM_setValue(key, val) {
@@ -59,9 +65,8 @@ function GM_xmlhttpRequest(details) {
     }
   };
 
-  const tauriInvoke = window.__TAURI__?.core?.invoke;
-  if (tauriInvoke) {
-    tauriInvoke("proxy_http", {
+  if (__PAKE_INVOKE__) {
+    __PAKE_INVOKE__("proxy_http", {
       req: {
         url: details.url,
         method: details.method || "GET",
@@ -78,7 +83,10 @@ function GM_xmlhttpRequest(details) {
         handleSuccess(res.status, res.statusText, res.finalUrl, res.responseText, res.responseHeaders)
       )
       .catch((err) => {
-        if (!aborted && details.onerror) details.onerror(err);
+        console.error("[Pake proxy_http error]", details.url, err);
+        if (!aborted && details.onerror) {
+          details.onerror({ status: 0, statusText: String(err), error: String(err) });
+        }
       });
   } else {
     fetch(details.url, {
@@ -104,3 +112,12 @@ function GM_xmlhttpRequest(details) {
     },
   };
 }
+
+window.GM = {
+  xmlHttpRequest: GM_xmlhttpRequest,
+  getValue: async (k, d) => GM_getValue(k, d),
+  setValue: async (k, v) => GM_setValue(k, v),
+  deleteValue: async (k) => GM_deleteValue(k),
+  addStyle: GM_addStyle,
+  registerMenuCommand: GM_registerMenuCommand,
+};
