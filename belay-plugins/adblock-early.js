@@ -36,7 +36,9 @@
     iframe[src*="adservice"], [data-ad-slot], [data-ad-unit],
     [id^="div-gpt-ad"], .ad-container, .ad-wrapper, .ad-slot,
     .ad-banner, .ad-unit, [class*="-ad-"], [class*="-ads"],
-    [class*="ads-"] {
+    [class*="ads-"], [data-testid*="ad-"], [data-component*="ad-"],
+    [id*="bbccom"], [class*="bbccom"], [class*="dotcom-ad"],
+    [aria-label="Advertisement"] {
       display: none !important;
       height: 0 !important;
       width: 0 !important;
@@ -67,7 +69,9 @@
   const AD_SELECTORS =
     'ins.adsbygoogle, iframe[src*="doubleclick"], iframe[src*="googleads"], ' +
     '[id^="div-gpt-ad"], [class*="ad-container"], [class*="ad-wrapper"], ' +
-    '[class*="ad-slot"], [class*="adsbygoogle"], [data-ad-slot], [data-ad-unit]';
+    '[class*="ad-slot"], [class*="adsbygoogle"], [data-ad-slot], [data-ad-unit], ' +
+    '[data-testid*="ad-"], [data-component*="ad-"], [id*="bbccom"], ' +
+    '[class*="bbccom"], [class*="dotcom-ad"], [aria-label="Advertisement"]';
 
   function collapseAdGaps() {
     document.querySelectorAll(AD_SELECTORS).forEach(function (ad) {
