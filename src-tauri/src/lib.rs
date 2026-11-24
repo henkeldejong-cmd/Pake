@@ -35,7 +35,7 @@ use app::{
         reveal_download, send_notification, set_dock_badge, set_dock_badge_label,
         set_title_bar_color, set_zoom, update_theme_mode, webview_navigate,
     },
-    proxy::proxy_http,
+    proxy::{kv_load, kv_set, proxy_http},
     setup::{set_global_shortcut, set_system_tray},
     window::{
         open_additional_window_safe, reapply_window_icon, reveal_built_window, save_last_url,
