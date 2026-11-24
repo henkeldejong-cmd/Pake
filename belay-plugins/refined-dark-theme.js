@@ -22,7 +22,7 @@
     surfaceRange: 0.20,
     dimImages: 0.92,
     disqus: 'invert',
-    skipHosts: ['archive.org'], // Heavy complex readers/apps can be listed here or toggled with Ctrl+Shift+D
+    skipHosts: ['archive.org', 'worldofreel.com'], // Heavy complex readers/apps can be listed here or toggled with Alt+Shift+D
     batch: 250
   };
   if (CFG.skipHosts.some(h => location.hostname === h || location.hostname.endsWith('.' + h))) return;
@@ -296,13 +296,17 @@
     setTimeout(() => t.remove(), 1400);
   }
 
-  // Ctrl+Shift+D toggles dark mode off/on for the current website
+  window.__refinedDarkToggle = () => {
+    toggleHostSkip();
+    if (active) { disable(); toast('Dark mode OFF for ' + location.hostname); }
+    else { enable(); toast('Dark mode ON for ' + location.hostname); }
+  };
+
+  // Alt+Shift+D toggles dark mode off/on (avoids Clipjump's Ctrl+Shift+D)
   document.addEventListener('keydown', e => {
-    if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'd') {
+    if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'd') {
       e.preventDefault();
-      toggleHostSkip();
-      if (active) { disable(); toast('Dark mode OFF for ' + location.hostname); }
-      else { enable(); toast('Dark mode ON for ' + location.hostname); }
+      window.__refinedDarkToggle();
     }
   });
 
