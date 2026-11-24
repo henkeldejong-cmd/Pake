@@ -34,7 +34,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Belay Homepage MSI
-        run: node dist/cli.js ./belay-site/Belay_Homepage.html --use-local-file --name "Belay Homepage" --identifier com.pake.belay.custom --width 1280 --height 760 --maximize --no-restore-last-url --internal-url-regex "^https?://" --inject ./belay-plugins/belay-shim.js --inject ./belay-plugins/adblock-early.js --inject ./belay-plugins/all-in-one-toolkit.js --inject ./belay-plugins/bypass-paywall.js --inject ./belay-plugins/explain-x.js --inject ./belay-plugins/inline-summaries.js --inject ./belay-plugins/olympus-tts.js --inject ./belay-plugins/refined-dark-theme.js
+        run: node dist/cli.js ./belay-site/Belay_Homepage.html --use-local-file --name "Belay Homepage" --identifier com.pake.belay.custom --width 1280 --height 760 --maximize --no-restore-last-url --internal-url-regex "^https?://" --inject ./belay-plugins/belay-shim.js --inject ./belay-plugins/adblock-early.js --inject ./belay-plugins/all-in-one-toolkit.js --inject ./belay-plugins/bypass-paywall.js --inject ./belay-plugins/explain-x.js --inject ./belay-plugins/inline-summaries.js --inject ./belay-plugins/olympus-tts.js --inject ./belay-plugins/refined-dark-theme.js --icon ./belay-plugins/belay-icon.png
 
       - name: Upload Belay Homepage MSI
         uses: actions/upload-artifact@v4
