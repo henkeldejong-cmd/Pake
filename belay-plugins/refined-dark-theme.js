@@ -16,16 +16,161 @@
   const isOn = () => { try { return localStorage.getItem(KEY) !== '0' && !isHostSkipped(); } catch (e) { return true; } };
   const saveOn = v => { try { localStorage.setItem(KEY, v ? '1' : '0'); } catch (e) {} };
 
+  function toast(msg) {
+    const t = document.createElement('div');
+    t.textContent = msg;
+    t.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:#222;color:#fff;padding:8px 14px;border-radius:20px;font:13px sans-serif;z-index:2147483647;opacity:.95';
+    (document.body || document.documentElement).appendChild(t);
+    setTimeout(() => t.remove(), 1400);
+  }
+
+  const host = location.hostname.toLowerCase();
+  const isArchive = host === 'archive.org' || host.endsWith('.archive.org');
+  const isWorldOfReel = host === 'worldofreel.com' || host.endsWith('.worldofreel.com');
+
+  /* =========================================================
+     MODE A: Internet Archive & Wayback Machine (Tested Script)
+     ========================================================= */
+  if (isArchive) {
+    const archiveCss = `
+      html, body { background-color: #121212 !important; color: #f5f5f5 !important; }
+      #wm-ipp, .wm-ipp, .nav-bg, .nav-container { background-color: #1e1e1e !important; color: #f5f5f5 !important; border-color: #444 !important; }
+      p, h1, h2, h3, h4, h5, h6, div, span, article, section, main { color: #ffffff !important; }
+      h1, h2, h3 { color: #ffffff !important; font-weight: 600 !important; }
+      h4, h5, h6 { color: #e8e8e8 !important; }
+      .byline, [class*="byline"], [class*="author"], .author { color: #cccccc !important; font-weight: 500 !important; }
+      .summary, .excerpt, .preview, [class*="summary"], [class*="excerpt"] { color: #eeeeee !important; }
+      .calendar, .calendar-day, .calendar-nav { background-color: #1e1e1e !important; color: #f5f5f5 !important; }
+      .calendar-day a { color: #90caf9 !important; }
+      .calendar-day.available { background-color: #2d2d2d !important; }
+      input, textarea, select { background-color: #2d2d2d !important; color: #ffffff !important; border-color: #555 !important; }
+      button, .btn { background-color: #333 !important; color: #ffffff !important; border-color: #555 !important; }
+      button:hover, .btn:hover { background-color: #444 !important; }
+      a { color: #64b5f6 !important; text-decoration: none !important; }
+      a:hover { color: #42a5f5 !important; text-decoration: underline !important; }
+      a:visited { color: #ba68c8 !important; }
+      table, tr, td, th { background-color: #1e1e1e !important; color: #f5f5f5 !important; border-color: #444 !important; }
+      #wm-ipp-base, #wm-banner { background-color: #1a1a1a !important; color: #f5f5f5 !important; }
+      .calendar-popup, .dropdown-menu, .select-dropdown { background-color: #252525 !important; color: #ffffff !important; border-color: #555 !important; }
+      .progress-bar, .meter { background-color: #333 !important; }
+      .progress-bar-fill { background-color: #1976d2 !important; }
+      *:not(img):not(svg):not(canvas):not(video) { color: #f5f5f5 !important; }
+      div:not([class*="image"]):not([id*="image"]) > p, article p, section p, .content p, .article p, .story p { color: #ffffff !important; line-height: 1.6 !important; }
+      .newsletter, .signup, [class*="newsletter"], [class*="signup"] { background-color: #252525 !important; color: #ffffff !important; border: 1px solid #444 !important; }
+      .iconochive, .logo { filter: invert(0.85) hue-rotate(180deg) brightness(1.2) !important; }
+      small, .small, .meta, .timestamp { color: #cccccc !important; }
+    `;
+    const styleEl = document.createElement('style');
+    styleEl.id = '__wayback-dark-css';
+    styleEl.textContent = archiveCss;
+
+    function applyArchiveDynamic() {
+      if (!active || !document.body) return;
+      document.querySelectorAll('div, section, article, p, span, h1, h2, h3, h4, h5, h6').forEach(el => {
+        if (el.hasAttribute('data-darkmode-applied')) return;
+        const st = getComputedStyle(el);
+        const c = st.color;
+        if (c.includes('0, 0, 0') || c.includes('51, 51, 51') || c.includes('85, 85, 85')) {
+          el.style.setProperty('color', (el.tagName === 'P' || el.tagName === 'SPAN' || el.tagName === 'DIV' || el.tagName.startsWith('H')) ? '#ffffff' : '#f5f5f5', 'important');
+        }
+        const bg = st.backgroundColor;
+        if (bg === 'rgb(255, 255, 255)' || bg === 'white') {
+          el.style.setProperty('background-color', '#1e1e1e', 'important');
+        }
+        el.setAttribute('data-darkmode-applied', 'true');
+      });
+    }
+
+    let archiveMo = null;
+    let active = false;
+    function enableArchive() {
+      if (active) return;
+      active = true;
+      (document.head || document.documentElement).appendChild(styleEl);
+      const start = () => {
+        applyArchiveDynamic();
+        if (!archiveMo && document.body) {
+          archiveMo = new MutationObserver(() => setTimeout(applyArchiveDynamic, 100));
+          archiveMo.observe(document.body, { childList: true, subtree: true });
+        }
+      };
+      if (document.body) start();
+      else window.addEventListener('DOMContentLoaded', start, { once: true });
+    }
+    function disableArchive() {
+      active = false;
+      styleEl.remove();
+      if (archiveMo) { archiveMo.disconnect(); archiveMo = null; }
+      document.querySelectorAll('[data-darkmode-applied]').forEach(el => {
+        el.removeAttribute('data-darkmode-applied');
+        el.style.removeProperty('color');
+        el.style.removeProperty('background-color');
+      });
+    }
+
+    window.__refinedDarkToggle = () => {
+      toggleHostSkip();
+      if (active) { disableArchive(); toast('Dark mode OFF for ' + location.hostname); }
+      else { enableArchive(); toast('Dark mode ON for ' + location.hostname); }
+    };
+    document.addEventListener('keydown', e => {
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); window.__refinedDarkToggle(); }
+    });
+    if (isOn()) enableArchive();
+    return;
+  }
+
+  /* =========================================================
+     MODE B: World of Reel (Edge-Style Selective Inversion)
+     ========================================================= */
+  if (isWorldOfReel) {
+    const worStyle = document.createElement('style');
+    worStyle.id = '__wor-selective-dark';
+    worStyle.textContent = `
+      html {
+        filter: invert(0.92) hue-rotate(180deg) !important;
+        background-color: #121214 !important;
+      }
+      img, video, picture, canvas, iframe, [style*="background-image"],
+      #__pake-nav-fab, #__pake-nav-menu, #summary-panel-container,
+      .olympus-pill-bar, #oa-float-btn, #explainx-panel {
+        filter: invert(1) hue-rotate(180deg) !important;
+      }
+    `;
+    let active = false;
+    const enableWor = () => {
+      active = true;
+      (document.head || document.documentElement).appendChild(worStyle);
+    };
+    const disableWor = () => {
+      active = false;
+      worStyle.remove();
+    };
+    window.__refinedDarkToggle = () => {
+      toggleHostSkip();
+      if (active) { disableWor(); toast('Dark mode OFF for ' + location.hostname); }
+      else { enableWor(); toast('Dark mode ON for ' + location.hostname); }
+    };
+    document.addEventListener('keydown', e => {
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); window.__refinedDarkToggle(); }
+    });
+    if (isOn()) enableWor();
+    return;
+  }
+
+  /* =========================================================
+     MODE C: Standard Refined Dark Theme (All Other Sites)
+     ========================================================= */
   const CFG = {
     pageBg: '#0a0a0c',
     minSurface: 0.045,
     surfaceRange: 0.20,
     dimImages: 0.92,
     disqus: 'invert',
-    skipHosts: ['archive.org', 'worldofreel.com'], // Heavy complex readers/apps can be listed here or toggled with Alt+Shift+D
+    skipHosts: [],
     batch: 250
   };
-  if (CFG.skipHosts.some(h => location.hostname === h || location.hostname.endsWith('.' + h))) return;
+  if (CFG.skipHosts.some(h => host === h || host.endsWith('.' + h))) return;
 
   const base = document.createElement('style');
   base.id = '__refined-dark-base';
@@ -150,7 +295,6 @@
     let cs;
     try { cs = getComputedStyle(el); } catch (e) { return parentLum; }
 
-    // Skip invisible full-screen preloaders/overlays so they never turn into opaque black walls
     if (cs.position === 'fixed' && (parseFloat(cs.opacity) < 0.15 || cs.pointerEvents === 'none')) {
       bgLum.set(el, parentLum);
       return parentLum;
@@ -239,7 +383,6 @@
     if (queue.length) schedule();
   }
 
-  // Only watch newly added elements (removes attribute-class thrashing that froze heavy sites)
   const mo = new MutationObserver(muts => {
     for (const m of muts) {
       if (m.type === 'childList') m.addedNodes.forEach(n => { markSeen(n); enqueue(n, true); });
@@ -288,21 +431,12 @@
     if (CFG.disqus === 'native') disqusFrames().forEach(f => { seen.delete(f); reinsert(f); });
   }
 
-  function toast(msg) {
-    const t = document.createElement('div');
-    t.textContent = msg;
-    t.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:#222;color:#fff;padding:8px 14px;border-radius:20px;font:13px sans-serif;z-index:2147483647;opacity:.95';
-    (document.body || document.documentElement).appendChild(t);
-    setTimeout(() => t.remove(), 1400);
-  }
-
   window.__refinedDarkToggle = () => {
     toggleHostSkip();
     if (active) { disable(); toast('Dark mode OFF for ' + location.hostname); }
     else { enable(); toast('Dark mode ON for ' + location.hostname); }
   };
 
-  // Alt+Shift+D toggles dark mode off/on (avoids Clipjump's Ctrl+Shift+D)
   document.addEventListener('keydown', e => {
     if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'd') {
       e.preventDefault();
