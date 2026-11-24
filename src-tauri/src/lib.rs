@@ -444,6 +444,8 @@ pub fn run_app() {
             quit_app,
             reveal_download,
             proxy_http,
+			kv_load,
+            kv_set,
         ])
         .setup(move |app| {
             // Grant remote IPC only to the immutable, packaged entry origins,
