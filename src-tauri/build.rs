@@ -17,6 +17,8 @@ fn main() {
             "quit_app",
             "reveal_download",
             "proxy_http",
+			"kv_load",
+			"kv_set"
         ]),
     ))
     .expect("Failed to build Pake permissions")
