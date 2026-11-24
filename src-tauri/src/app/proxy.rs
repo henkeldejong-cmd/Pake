@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tauri::Manager;
 
 #[derive(Deserialize)]
 pub struct ProxyHttpRequest {
@@ -74,4 +75,49 @@ pub async fn proxy_http(req: ProxyHttpRequest) -> Result<ProxyHttpResponse, Stri
         response_text,
         response_headers,
     })
+}
+
+fn plugin_storage_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("plugin_storage.json"))
+}
+
+#[tauri::command]
+pub fn kv_load(app: tauri::AppHandle) -> Result<HashMap<String, serde_json::Value>, String> {
+    let path = plugin_storage_path(&app)?;
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(serde_json::from_str(&content).unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn kv_set(
+    app: tauri::AppHandle,
+    key: String,
+    value: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let path = plugin_storage_path(&app)?;
+    let mut map: HashMap<String, serde_json::Value> = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    match value {
+        Some(v) => {
+            map.insert(key, v);
+        }
+        None => {
+            map.remove(&key);
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
 }
