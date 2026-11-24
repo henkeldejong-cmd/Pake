@@ -5,9 +5,13 @@ const __PAKE_INVOKE__ =
   window.__TAURI_INTERNALS__?.invoke ||
   null;
 
+const __PAKE_SHELL_OPEN__ =
+  (typeof __TAURI__ !== "undefined" && __TAURI__?.shell?.open) ||
+  window.__TAURI__?.shell?.open ||
+  null;
+
 window.unsafeWindow = window;
 
-// 1. Capture homepage URL whenever Belay_Homepage.html loads
 const __origSetItem = Storage.prototype.setItem;
 const __origRemoveItem = Storage.prototype.removeItem;
 const __KV_CACHE__ = {};
@@ -24,7 +28,6 @@ function syncToDisk(key, val) {
   }
 }
 
-// Mirror plugin localStorage keys automatically across domains & restarts
 Storage.prototype.setItem = function (k, v) {
   __origSetItem.call(this, k, v);
   if (this === window.localStorage && isPluginKey(k)) {
@@ -38,7 +41,6 @@ Storage.prototype.removeItem = function (k) {
   }
 };
 
-// Hydrate saved keys from Rust disk storage immediately
 if (__PAKE_INVOKE__) {
   __PAKE_INVOKE__("kv_load")
     .then((map) => {
@@ -167,13 +169,23 @@ window.GM = {
   registerMenuCommand: GM_registerMenuCommand,
 };
 
-// 2. Bottom-Right Hamburger Navigator (Click = Back | Long-press = Home | Right-click = Menu)
+// Bottom-Right Hamburger Navigator (Click = Back | Hold = Home | Right-click = Menu)
 (function initNavHamburger() {
   if (window !== window.top) return;
 
   const goHome = () => {
     const saved = __KV_CACHE__["__belay_home_url"] || "http://tauri.localhost/Belay_Homepage.html";
     window.location.href = saved;
+  };
+
+  const openInBrowser = () => {
+    if (location.hostname === "tauri.localhost") return;
+    const url = location.href;
+    if (__PAKE_SHELL_OPEN__) {
+      Promise.resolve(__PAKE_SHELL_OPEN__(url)).catch(() => {});
+    } else if (__PAKE_INVOKE__) {
+      __PAKE_INVOKE__("plugin:shell|open", { path: url }).catch(() => {});
+    }
   };
 
   const mount = () => {
@@ -193,7 +205,7 @@ window.GM = {
     const menu = document.createElement("div");
     menu.id = "__pake-nav-menu";
     menu.style.cssText =
-      "position:fixed;right:18px;bottom:66px;min-width:185px;background:#1c1c22;color:#f1f1f4;" +
+      "position:fixed;right:18px;bottom:66px;min-width:195px;background:#1c1c22;color:#f1f1f4;" +
       "border:1px solid #35353f;border-radius:10px;padding:6px;display:none;flex-direction:column;" +
       "gap:4px;box-shadow:0 8px 24px rgba(0,0,0,0.55);z-index:2147483647;font:13px sans-serif;";
 
@@ -213,6 +225,7 @@ window.GM = {
     };
 
     addItem("🌙 Toggle Dark Theme", () => window.__refinedDarkToggle && window.__refinedDarkToggle());
+    addItem("🌐 Open with Browser", openInBrowser);
     addItem("🏠 Belay Homepage", goHome);
     addItem("⬅️ Back", () => history.back());
     addItem("➡️ Forward", () => history.forward());
