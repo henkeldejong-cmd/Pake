@@ -140,13 +140,6 @@ GM_addStyle(`
   #yt-anchor-scroll-top { position: fixed; bottom: 44px; right: 16px; z-index: 2000; background: rgba(0,0,0,0.65); color: #fff; border: none; border-radius: 4px; padding: 4px 8px; font: 600 10px/1.4 "YouTube Sans", Arial, sans-serif; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,.4); transition: background .15s; display: none; }
   #yt-anchor-scroll-top:hover { background: rgba(0,0,0,0.85); }
   #yt-anchor-spacer { display: none; width: 100%; flex-shrink: 0; }
-  
-  /* Top controls adjustment when sidebar is open */
-  body.yt-sidebar-open #yt-lucky-controls-v3-wrapper {
-    right: var(--yt-plugin-sidebar-w) !important;
-    width: calc(100% - var(--yt-plugin-sidebar-w)) !important;
-    transition: right 0.2s ease, width 0.2s ease;
-  }
 
   /* Push YouTube content left when sidebar is open */
   body.yt-sidebar-open {
@@ -197,10 +190,10 @@ GM_addStyle(`
 
   /* Top controls */
   #yt-lucky-controls-v3-wrapper {
-    position: sticky;
-    top: 0;
-    left: 0;
-    right: 0;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
     z-index: 2147483646;
     display: flex;
     flex-direction: row;
@@ -210,7 +203,8 @@ GM_addStyle(`
     background: #0f0f0f;
     border-bottom: 1px solid #222;
     align-items: center;
-    width: 100%;
+    width: 100vw !important;
+    max-width: 100vw !important;
     box-sizing: border-box;
     min-height: 40px;
   }
@@ -538,7 +532,7 @@ function fixFullWidth() {
     const sb = document.getElementById('yt-lucky-playlist-sidebar-v3');
     if (sb) { sb.style.width = '100vw'; sb.style.left = '0'; sb.style.right = 'auto'; }
     const tb = document.getElementById('yt-lucky-controls-v3-wrapper');
-    if (tb) { tb.style.width = '100%'; tb.style.marginRight = '0'; tb.style.marginLeft = '0'; }
+    if (tb) { tb.style.width = '100vw'; tb.style.marginRight = '0'; tb.style.marginLeft = '0'; }
     return;
   }
   const targetCssWidth = window.innerWidth / z;
@@ -4640,12 +4634,15 @@ window.addEventListener('resize', () => {
 });
 
 document.addEventListener('fullscreenchange', () => {
+  const topBar = document.getElementById('yt-lucky-controls-v3-wrapper');
   if (document.fullscreenElement) {
     document.documentElement.style.setProperty('zoom', '1', 'important');
     document.body.style.setProperty('zoom', '1', 'important');
+    if (topBar) topBar.style.setProperty('display', 'none', 'important');
   } else {
     document.documentElement.style.removeProperty('zoom');
     document.body.style.removeProperty('zoom');
+    if (topBar) topBar.style.setProperty('display', 'flex', 'important');
   }
 });
 
