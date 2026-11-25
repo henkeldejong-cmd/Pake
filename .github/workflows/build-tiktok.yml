@@ -1,0 +1,44 @@
+name: Build My Custom TikTok App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "tiktok-plugins/**"
+      - ".github/workflows/build-tiktok.yml"
+  workflow_dispatch:
+
+jobs:
+  build-tiktok-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Check combined JS syntax
+        shell: bash
+        run: |
+          cat tiktok-plugins/tiktok-shim.js tiktok-plugins/all-in-one-toolkit.js tiktok-plugins/explain-x.js tiktok-plugins/tiktok-playlist-plugin.js tiktok-plugins/tiktok-plugin.js > combined-check.js
+          node --check combined-check.js
+          rm combined-check.js
+
+      - name: Setup Pake environment
+        uses: ./.github/actions/setup-env
+        with:
+          mode: build
+
+      - name: Build Pake CLI
+        run: pnpm run cli:build
+
+      - name: Build Custom TikTok MSI
+        run: node dist/cli.js https://www.tiktok.com --name "TikTok" --identifier com.pake.tiktok.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url --inject ./tiktok-plugins/tiktok-shim.js --inject ./tiktok-plugins/all-in-one-toolkit.js --inject ./tiktok-plugins/explain-x.js --inject ./tiktok-plugins/tiktok-playlist-plugin.js --inject ./tiktok-plugins/tiktok-plugin.js
+
+      - name: Upload TikTok MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-tiktok-msi
+          path: "*.msi"
+          if-no-files-found: error
