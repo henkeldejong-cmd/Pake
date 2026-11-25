@@ -21,7 +21,7 @@ window.unsafeWindow = window;
     return null;
   };
 
-  ["mouseover", "pointerover"].forEach((evtName) => {
+  ["mouseover", "mouseenter", "pointerover"].forEach((evtName) => {
     window.addEventListener(
       evtName,
       (e) => {
@@ -29,7 +29,7 @@ window.unsafeWindow = window;
         if (!link) return;
         const isReddit = /(^|\.)(reddit\.com|redd\.it)$/i.test(link.hostname);
         if (isReddit) {
-          if (evtName === "mouseover" && window.__rppHandleHover) {
+          if (evtName === "mouseenter" && window.__rppHandleHover) {
             window.__rppHandleHover(e);
           }
           if (e.ctrlKey) {
