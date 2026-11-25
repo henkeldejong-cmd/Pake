@@ -1,4 +1,4 @@
-// --- Pake Shim + Rust proxy_http + Disk Key Persistence for Reddit ---
+// --- Safe Pake Shim (proxy_http + GM_* Disk Persistence, No Storage.prototype hook) ---
 const __PAKE_INVOKE__ =
   (typeof __TAURI__ !== "undefined" && __TAURI__?.core?.invoke) ||
   window.__TAURI__?.core?.invoke ||
@@ -7,14 +7,18 @@ const __PAKE_INVOKE__ =
 
 window.unsafeWindow = window;
 
-const __origSetItem = Storage.prototype.setItem;
-const __origRemoveItem = Storage.prototype.removeItem;
 const __KV_CACHE__ = {};
 
-const isPluginKey = (k) =>
-  /api|key|token|secret|model|voice|tts|explain|olympus|summary|summaries|toolkit|reddit|rpp|rd_toolkit/i.test(
-    String(k)
-  );
+if (__PAKE_INVOKE__ && window === window.top) {
+  __PAKE_INVOKE__("kv_load")
+    .then((map) => {
+      if (!map || typeof map !== "object") return;
+      for (const [k, v] of Object.entries(map)) {
+        __KV_CACHE__[k] = v;
+      }
+    })
+    .catch(() => {});
+}
 
 function syncToDisk(key, val) {
   __KV_CACHE__[key] = val;
@@ -23,38 +27,9 @@ function syncToDisk(key, val) {
   }
 }
 
-Storage.prototype.setItem = function (k, v) {
-  __origSetItem.call(this, k, v);
-  if (this === window.localStorage && isPluginKey(k)) {
-    syncToDisk("ls_" + k, String(v));
-  }
-};
-Storage.prototype.removeItem = function (k) {
-  __origRemoveItem.call(this, k);
-  if (this === window.localStorage && isPluginKey(k)) {
-    syncToDisk("ls_" + k, null);
-  }
-};
-
-if (__PAKE_INVOKE__) {
-  __PAKE_INVOKE__("kv_load")
-    .then((map) => {
-      if (!map || typeof map !== "object") return;
-      for (const [k, v] of Object.entries(map)) {
-        __KV_CACHE__[k] = v;
-        if (k.startsWith("ls_") && typeof v === "string") {
-          try {
-            __origSetItem.call(window.localStorage, k.slice(3), v);
-          } catch (e) {}
-        }
-      }
-    })
-    .catch(() => {});
-}
-
 function GM_setValue(key, val) {
   try {
-    __origSetItem.call(window.localStorage, "rd_toolkit_" + key, JSON.stringify(val));
+    localStorage.setItem("rd_toolkit_" + key, JSON.stringify(val));
   } catch (e) {}
   syncToDisk("gm_" + key, val);
 }
@@ -65,7 +40,7 @@ function GM_getValue(key, defaultVal) {
     return cached !== null && cached !== undefined ? cached : defaultVal;
   }
   try {
-    const raw = window.localStorage.getItem("rd_toolkit_" + key);
+    const raw = localStorage.getItem("rd_toolkit_" + key);
     return raw !== null ? JSON.parse(raw) : defaultVal;
   } catch (e) {
     return defaultVal;
@@ -74,7 +49,7 @@ function GM_getValue(key, defaultVal) {
 
 function GM_deleteValue(key) {
   try {
-    __origRemoveItem.call(window.localStorage, "rd_toolkit_" + key);
+    localStorage.removeItem("rd_toolkit_" + key);
   } catch (e) {}
   delete __KV_CACHE__["gm_" + key];
   syncToDisk("gm_" + key, null);
