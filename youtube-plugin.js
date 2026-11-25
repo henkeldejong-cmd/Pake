@@ -169,6 +169,38 @@ GM_addStyle(`
     box-sizing: border-box;
     overflow: hidden;
   }
+  
+  /* Slim dark scrollbars & tight column divider for Parallel Mode */
+  #yt-lucky-playlist-sidebar-v3 *,
+  .yt-lucky-pdisplay-col,
+  #yt-lucky-listcontainer-v3 {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.16) transparent;
+  }
+  #yt-lucky-playlist-sidebar-v3 *::-webkit-scrollbar,
+  .yt-lucky-pdisplay-col::-webkit-scrollbar,
+  #yt-lucky-listcontainer-v3::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  #yt-lucky-playlist-sidebar-v3 *::-webkit-scrollbar-track,
+  .yt-lucky-pdisplay-col::-webkit-scrollbar-track,
+  #yt-lucky-listcontainer-v3::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  #yt-lucky-playlist-sidebar-v3 *::-webkit-scrollbar-thumb,
+  .yt-lucky-pdisplay-col::-webkit-scrollbar-thumb,
+  #yt-lucky-listcontainer-v3::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.16);
+    border-radius: 2px;
+  }
+  #yt-lucky-playlist-sidebar-v3 *::-webkit-scrollbar-thumb:hover,
+  .yt-lucky-pdisplay-col::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.3);
+  }
+  .yt-lucky-pdisplay-col:last-child {
+    border-right: none !important;
+  }
 
   /* Left Edge Width Resize Handle */
   .resize-handle-pl {
@@ -3989,7 +4021,7 @@ function renderPlaylistUI() {
     lc.style.flexDirection = 'row';
     lc.style.overflowX = 'auto';
     lc.style.overflowY = 'hidden';
-    lc.style.gap = '10px';
+    lc.style.gap = '2px';
     lc.onscroll = null;
     
     let cols = keys.length;
@@ -3999,12 +4031,12 @@ function renderPlaylistUI() {
     if (cols === 0) { lc.innerHTML = '<div style="opacity:0.7;padding:6px 4px;">(no playlists)</div>'; return; }
     
     const toShow = Math.min(cols, 4);
-    const cw = `calc(${100 / toShow}% - ${(10 * (toShow - 1)) / toShow}px)`;
+    const cw = `calc(${100 / toShow}% - ${(2 * (toShow - 1)) / toShow}px)`;
     
     const renderCol = (title, items, isTrans = false, color = '#ff6b6b', specKey = null) => {
       const col = document.createElement('div');
       col.className = 'yt-lucky-pdisplay-col';
-      Object.assign(col.style, { flex: `0 0 ${cw}`, height: '100%', overflowY: 'auto', borderRight: '1px solid rgba(255,255,255,0.1)', paddingRight: '5px', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' });
+      Object.assign(col.style, { flex: `0 0 ${cw}`, height: '100%', overflowY: 'auto', borderRight: '1px solid rgba(255,255,255,0.06)', paddingRight: '2px', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' });
       
       const hd = document.createElement('div');
       Object.assign(hd.style, { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold', marginBottom: '6px', color, flexShrink: '0', borderBottom: '1px solid #333', paddingBottom: '4px', fontSize: '13px', position: 'sticky', top: '0', background: '#121212', zIndex: '2' });
@@ -4081,7 +4113,7 @@ function renderPlaylistUI() {
       const mapped = transientArtistData.lines.map((l, i) => ({ key: '__TRANSIENT_ARTIST__', idx: i, line: l, pName: transientArtistData.name }));
       const col = document.createElement('div');
       col.className = 'yt-lucky-pdisplay-col';
-      Object.assign(col.style, { flex: `0 0 ${cw}`, height: '100%', overflowY: 'auto', borderRight: '1px solid rgba(255,255,255,0.1)', paddingRight: '5px', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' });
+      Object.assign(col.style, { flex: `0 0 ${cw}`, height: '100%', overflowY: 'auto', borderRight: '1px solid rgba(255,255,255,0.06)', paddingRight: '2px', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' });
       
       const hd = document.createElement('div');
       Object.assign(hd.style, { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold', marginBottom: '6px', color: '#ffaa00', flexShrink: '0', borderBottom: '1px solid #333', paddingBottom: '4px', fontSize: '13px', position: 'sticky', top: '0', background: '#121212', zIndex: '2' });
