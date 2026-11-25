@@ -12,6 +12,7 @@ on:
 jobs:
   build-facebook-windows:
     runs-on: windows-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout fork
