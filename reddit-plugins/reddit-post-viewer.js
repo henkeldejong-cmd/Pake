@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Hover Post & Comment Downloader (Desktop App Edition)
 // @namespace    http://tampermonkey.net/
-// @version      5.4.1
+// @version      5.4.2
 // @description  View, download, or copy Reddit posts and comments. Adapted for desktop app wrappers.
 // @author       You (modified)
 // @match        https://www.reddit.com/*
@@ -54,7 +54,7 @@
     const CACHE_MAX_ITEMS = 50;
 
     // --- State Management ---
-    let useCtrlHover = GM_getValue('rpp_use_ctrl_hover', true); // Default to true so Ctrl+Hover is active
+    let useCtrlHover = GM_getValue('rpp_use_ctrl_hover', true);
 
     // --- Cache ---
     const cache = {
@@ -164,19 +164,21 @@
 
     // --- Toggle Logic ---
     function toggleTriggerMode() {
-    useCtrlHover = !useCtrlHover;
-    GM_setValue('rpp_use_ctrl_hover', useCtrlHover);
-    const status = useCtrlHover ? "ON (Ctrl + Hover)" : "OFF (Disabled)";
-    showToast(`Trigger Mode: ${status}`);
-}
-
-GM_registerMenuCommand("Toggle Ctrl+Hover Mode", toggleTriggerMode);
-
-document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && (e.key === 'q' || e.key === 'Q')) {
-        toggleTriggerMode();
+        useCtrlHover = !useCtrlHover;
+        GM_setValue('rpp_use_ctrl_hover', useCtrlHover);
+        const status = useCtrlHover ? "ON (Ctrl + Hover)" : "OFF (Disabled)";
+        showToast(`Trigger Mode: ${status}`);
     }
-});
+
+    GM_registerMenuCommand("Toggle Ctrl+Hover Mode", toggleTriggerMode);
+
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && (e.key === 'q' || e.key === 'Q')) {
+            toggleTriggerMode();
+        } else if (e.key === 'Escape') {
+            hidePopup();
+        }
+    });
 
     // --- CSS for UI ---
     const style = document.createElement('style');
@@ -242,7 +244,6 @@ document.addEventListener('keydown', (e) => {
     popup.className = 'hover-comment-popup';
     popup.style.display = 'none';
 
-    // Invisible probe to measure true viewport offset
     const probe = document.createElement('div');
     probe.id = 'rpp-viewport-probe';
     probe.style.cssText = 'position:fixed!important;top:0px!important;left:0px!important;width:1px!important;height:1px!important;visibility:hidden!important;pointer-events:none!important;margin:0!important;padding:0!important;border:none!important;';
@@ -275,7 +276,8 @@ document.addEventListener('keydown', (e) => {
         delete popup.dataset.currentUrl;
     }
 
-    let activationTimeout;
+    let activationTimeout = null;
+    let activeHoverLink = null;
 
     function decodeHtmlEntities(text) {
         const ta = document.createElement('textarea');
@@ -333,7 +335,7 @@ document.addEventListener('keydown', (e) => {
                 const repliesContainer = document.createElement('div');
                 repliesContainer.className = 'rpp-replies-container';
                 toggleBtn.addEventListener('click', () => {
-                    const isHidden = repliesContainer.style.display === 'none';
+                    const isHidden = repliesContainer.style.display === 'none' || !repliesContainer.style.display;
                     repliesContainer.style.display = isHidden ? 'block' : 'none';
                     toggleBtn.textContent = isHidden ? `▼ Hide replies` : `▶ Show ${validReplies.length} replies`;
                 });
@@ -450,24 +452,45 @@ document.addEventListener('keydown', (e) => {
         }
     }
 
-    function getClosestRedditLink(target) {
-        if (!target) return null;
-        const el = target instanceof Element ? target : target.parentElement;
-        if (!el || typeof el.closest !== 'function') return null;
-        const link = el.closest('a[href*="/comments/"]');
-        if (!link || link.href.includes('/search')) return null;
-        return link;
+    // Stop immediately at the innermost <a> tag so external links (e.g., Telegraph) don't fall through to the outer Reddit post card
+    function getClosestRedditLinkFromEvent(e) {
+        const path = e.composedPath ? e.composedPath() : [e.target];
+        for (const el of path) {
+            if (el === popup) return null;
+            if (el && el.tagName === 'A' && el.href) {
+                const isRedditPost =
+                    /(^|\.)reddit\.com$/i.test(el.hostname) &&
+                    el.pathname.includes('/comments/') &&
+                    !el.pathname.includes('/search');
+                return isRedditPost ? el : null;
+            }
+        }
+        return null;
     }
 
-    document.addEventListener('mouseenter', (e) => {
-    const link = getClosestRedditLink(e.target);
-    if (!link) return;
+    function onHoverEnter(e) {
+        const link = getClosestRedditLinkFromEvent(e);
+        if (!link) return;
+        if (useCtrlHover && !e.ctrlKey) return;
+        if (activeHoverLink === link) return;
 
-    // Require Ctrl key to be held down
-    if (useCtrlHover && !e.ctrlKey) return;
+        clearTimeout(activationTimeout);
+        activeHoverLink = link;
+        const jsonUrl = link.href.split('?')[0].replace(/\/$/, '') + '.json';
+        activationTimeout = setTimeout(() => {
+            if (activeHoverLink === link) showPopup(jsonUrl);
+        }, HOVER_DELAY);
+    }
 
-    const jsonUrl = link.href.split('?')[0].replace(/\/$/, '') + '.json';
-    activationTimeout = setTimeout(() => showPopup(jsonUrl), HOVER_DELAY);
-}, true);
+    window.__rppHandleHover = onHoverEnter;
+    document.addEventListener('mouseenter', onHoverEnter, true);
+
+    document.addEventListener('mouseleave', (e) => {
+        if (!activeHoverLink) return;
+        if (e.target === activeHoverLink) {
+            clearTimeout(activationTimeout);
+            activeHoverLink = null;
+        }
+    }, true);
 
 })();
