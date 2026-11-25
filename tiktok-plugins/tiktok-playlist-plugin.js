@@ -1,8 +1,8 @@
 // ==UserScript Adapted for Pake==
 // @name         Final Tiktok Playlist (TSV Avatar Import Edition) — Pake Edition
 // @namespace    belay m.
-// @version      2.7.1-pake
-// @description  TikTok playlist with category grouping, category filter dropdown, robust avatar extraction, live sync engine, persistent KV + IndexedDB storage, wheel-scroll isolation, avatars-only mode, font controls, and TSV avatar import support.
+// @version      2.8.0-pake
+// @description  TikTok playlist with category grouping, category filter dropdown, multi-tier Pake avatar sync, persistent KV + IndexedDB storage, wheel-scroll isolation, avatars-only mode, font controls, draggable controls, and TSV avatar import support.
 // @match        https://www.tiktok.com/*
 // @match        *://*.tiktok.com/*
 // ==/UserScript Adapted for Pake==
@@ -55,6 +55,7 @@
     'tt_playlist_fsize',
     'tt_playlist_ffam',
     'tt_playlist_geom',
+    'tt_playlist_ctrl_geom',
     'tt_playlist_avatar_only',
     'tt_playlist_selected_cat'
   ];
@@ -82,7 +83,7 @@
       if (__LEGACY_KEYS__.includes(key)) {
         const legacy = window.localStorage.getItem(key);
         if (legacy !== null) {
-          if (key === 'tt_playlist_list' || key === 'tt_playlist_geom') {
+          if (key === 'tt_playlist_list' || key === 'tt_playlist_geom' || key === 'tt_playlist_ctrl_geom') {
             return __safeJsonParse(legacy, legacy);
           }
           return legacy;
@@ -488,7 +489,7 @@
   };
 
   /* =========================================================================
-     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v2.7.1
+     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v2.8.0
      ========================================================================= */
   (function () {
     'use strict';
@@ -505,6 +506,7 @@
     const STORAGE_FFAM         = 'tt_playlist_ffam';
     const STORAGE_AVATARS      = 'tt_playlist_avatars';
     const STORAGE_GEOM         = 'tt_playlist_geom';
+    const STORAGE_CTRL_GEOM    = 'tt_playlist_ctrl_geom';
     const STORAGE_AVATAR_ONLY  = 'tt_playlist_avatar_only';
     const STORAGE_SELECTED_CAT = 'tt_playlist_selected_cat';
 
@@ -546,6 +548,8 @@
     let selectedCategory = String(GM_getValue(STORAGE_SELECTED_CAT, '') || '');
     let isSyncing        = false;
     let syncAborted      = false;
+
+    const sessionFailedSet = new Set();
 
     const parseMaybeJson = (raw, fallback) => {
       if (raw === null || raw === undefined) return fallback;
@@ -598,6 +602,13 @@
     };
     const saveGeom  = (g) => GM_setValue(STORAGE_GEOM, g);
 
+    const defaultCtrlGeom = { left: '', top: '14px', right: '260px' };
+    const loadCtrlGeom = () => {
+      const parsed = parseMaybeJson(GM_getValue(STORAGE_CTRL_GEOM, null), null);
+      return parsed && typeof parsed === 'object' ? { ...defaultCtrlGeom, ...parsed } : { ...defaultCtrlGeom };
+    };
+    const saveCtrlGeom = (g) => GM_setValue(STORAGE_CTRL_GEOM, g);
+
     /* Safe DOM creation helper (avoids innerHTML / Trusted Types issues) */
     function el(tag, props, children) {
       const node = document.createElement(tag);
@@ -615,6 +626,15 @@
         }
       }
       return node;
+    }
+
+    function isValidAvatarVal(val) {
+      return (
+        typeof val === 'string' &&
+        val.length > 0 &&
+        val !== 'NONE' &&
+        (val.startsWith('http') || val.startsWith('data:image'))
+      );
     }
 
     /***************************************************************************
@@ -712,7 +732,18 @@
         const raw = window.localStorage.getItem(STORAGE_AVATARS);
         if (!raw) return {};
         const parsed = parseMaybeJson(raw, {});
-        return parsed && typeof parsed === 'object' ? parsed : {};
+        if (!parsed || typeof parsed !== 'object') return {};
+        // Purge any poisoned 'NONE' entries from older versions
+        const clean = {};
+        let purged = false;
+        for (const [k, v] of Object.entries(parsed)) {
+          if (isValidAvatarVal(v)) clean[k] = v;
+          else purged = true;
+        }
+        if (purged) {
+          try { window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(clean)); } catch (_) {}
+        }
+        return clean;
       } catch (_) {
         return {};
       }
@@ -742,6 +773,7 @@
     }
 
     function idbPut(key, val) {
+      if (!isValidAvatarVal(val)) return;
       getIDB().then((db) => {
         if (!db) return;
         try {
@@ -751,17 +783,33 @@
       });
     }
 
+    function idbDelete(key) {
+      getIDB().then((db) => {
+        if (!db) return;
+        try {
+          const tx = db.transaction(DB_STORE, 'readwrite');
+          tx.objectStore(DB_STORE).delete(key);
+        } catch (_) {}
+      });
+    }
+
     getIDB().then((db) => {
       if (!db) return;
       try {
-        const tx = db.transaction(DB_STORE, 'readonly');
+        const tx = db.transaction(DB_STORE, 'readwrite');
         const store = tx.objectStore(DB_STORE);
         const cursorReq = store.openCursor();
         cursorReq.onsuccess = (e) => {
           const cursor = e.target.result;
           if (cursor) {
-            if (!avatarCache[cursor.key] && cursor.value) {
-              avatarCache[cursor.key] = cursor.value;
+            if (isValidAvatarVal(cursor.value)) {
+              if (!avatarCache[cursor.key]) {
+                avatarCache[cursor.key] = cursor.value;
+                broadcastAvatarUpdate(cursor.key, cursor.value);
+              }
+            } else {
+              // Purge poisoned 'NONE' / invalid entries from IndexedDB
+              try { cursor.delete(); } catch (_) {}
             }
             cursor.continue();
           } else {
@@ -773,10 +821,11 @@
 
     let avatarSaveTimer = null;
     function cacheAvatar(username, url) {
-      if (!username || !url) return;
-      const u = username.toLowerCase();
-      if (avatarCache[u] === url) return;
+      if (!username || !isValidAvatarVal(url)) return;
+      const u = cleanUsername(username);
+      if (!u || avatarCache[u] === url) return;
       avatarCache[u] = url;
+      sessionFailedSet.delete(u);
 
       idbPut(u, url);
 
@@ -792,14 +841,16 @@
     }
 
     /***************************************************************************
-     * Long-Term Storage: Base64 Conversion Engine
+     * Long-Term Storage: Base64 Conversion Engine (non-blocking upgrade)
      ***************************************************************************/
     async function convertUrlToBase64(url) {
       if (!url || url.startsWith('data:image')) return url;
       return new Promise((resolve) => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
+        const timer = setTimeout(() => resolve(url), 6000);
         img.onload = () => {
+          clearTimeout(timer);
           try {
             const canvas = document.createElement('canvas');
             canvas.width = img.width;
@@ -811,7 +862,10 @@
             resolve(url);
           }
         };
-        img.onerror = () => resolve(url);
+        img.onerror = () => {
+          clearTimeout(timer);
+          resolve(url);
+        };
         img.src = url;
       });
     }
@@ -837,6 +891,14 @@
       window.location.assign(targetUrl);
     }
 
+    function isGoodAvatarUrl(url) {
+      if (!url || typeof url !== 'string') return false;
+      if (url.startsWith('data:image')) return true;
+      if (!url.startsWith('http')) return false;
+      if (/default[-_]avatar|tiktok[-_]logo|tt[-_]logo|webapp-desktop/i.test(url)) return false;
+      return true;
+    }
+
     function harvestAvatarsFromDOM() {
       if (!document.body) return;
 
@@ -845,10 +907,10 @@
         const avatarImg = document.querySelector(
           '[data-e2e="user-avatar"] img, img[class*="ImgAvatar"], .e1iqrkv71, header img[src*="tiktokcdn"]'
         );
-        if (avatarImg && avatarImg.src && !avatarImg.src.startsWith('data:') && !avatarImg.src.includes('default-avatar')) {
+        if (avatarImg && isGoodAvatarUrl(avatarImg.src) && !avatarImg.src.startsWith('data:')) {
           const currentCached = avatarCache[cur];
           if (!currentCached || !currentCached.startsWith('data:image')) {
-            avatarCache[cur] = avatarImg.src;
+            cacheAvatar(cur, avatarImg.src);
             broadcastAvatarUpdate(cur, avatarImg.src);
 
             convertUrlToBase64(avatarImg.src).then((base64) => {
@@ -869,11 +931,11 @@
           const match = href.match(/\/@([a-zA-Z0-9._]+)/);
           if (match) {
             const u = cleanUsername(match[1]);
-            const currentCached = avatarCache[u];
-            if (u && (!currentCached || currentCached === 'NONE')) {
+            if (u && !isValidAvatarVal(avatarCache[u])) {
               const img = a.querySelector('img[src*="tiktokcdn"]');
-              if (img && img.src && !img.src.startsWith('data:') && !img.src.includes('default-avatar')) {
-                avatarCache[u] = img.src;
+              if (img && isGoodAvatarUrl(img.src) && !img.src.startsWith('data:')) {
+                cacheAvatar(u, img.src);
+                broadcastAvatarUpdate(u, img.src);
                 convertUrlToBase64(img.src).then((base64) => {
                   if (base64 && base64.startsWith('data:image')) {
                     cacheAvatar(u, base64);
@@ -888,47 +950,115 @@
     }
 
     /***************************************************************************
-     * Multi-Stage Avatar Extraction Engine (Fetch + proxy_http Fallback)
+     * Multi-Tier Pake Avatar Resolution Engine
+     *   Tier 1: TikWM User Info API via Rust proxy_http (no X-Bogus / CORS)
+     *   Tier 2: TikTok Profile & Embed HTML via browser fetch()
+     *   Tier 3: TikTok Embed & Profile HTML via proxy_http with Desktop headers
+     *   Tier 4: Unavatar JSON API via proxy_http (bypasses img-src CSP)
      ***************************************************************************/
-    function proxyGetText(url) {
+    function proxyGetText(url, headers = {}) {
       return new Promise((resolve) => {
         GM_xmlhttpRequest({
           url,
           method: 'GET',
+          headers,
           timeout: 12000,
           onload(res) {
-            resolve({ status: res.status, text: res.responseText || '' });
+            resolve({ status: res.status, text: res.responseText || '', finalUrl: res.finalUrl || url });
           },
           onerror() {
-            resolve({ status: 0, text: '' });
+            resolve({ status: 0, text: '', finalUrl: url });
           },
           ontimeout() {
-            resolve({ status: 0, text: '' });
+            resolve({ status: 0, text: '', finalUrl: url });
           }
         });
       });
     }
 
-    function extractAvatarFromHtml(html) {
-      if (!html) return null;
+    function proxyGetJson(url, headers = {}) {
+      return new Promise((resolve) => {
+        GM_xmlhttpRequest({
+          url,
+          method: 'GET',
+          headers: { Accept: 'application/json', ...headers },
+          responseType: 'json',
+          timeout: 12000,
+          onload(res) {
+            if (res.response && typeof res.response === 'object') {
+              resolve({ status: res.status, data: res.response });
+            } else {
+              resolve({ status: res.status, data: parseMaybeJson(res.responseText, null) });
+            }
+          },
+          onerror() {
+            resolve({ status: 0, data: null });
+          },
+          ontimeout() {
+            resolve({ status: 0, data: null });
+          }
+        });
+      });
+    }
+
+    function decodeEscapedUrl(raw) {
+      if (!raw || typeof raw !== 'string') return '';
+      return raw
+        .replace(/\\u002F/gi, '/')
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/gi, '&')
+        .replace(/&amp;/g, '&')
+        .trim();
+    }
+
+    function extractAvatarFromHtml(html, username) {
+      if (!html || typeof html !== 'string') return null;
+
+      // 1. __UNIVERSAL_DATA_FOR_REHYDRATION__
       try {
         const jsonMatch = html.match(/<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i);
         if (jsonMatch && jsonMatch[1]) {
-          const rehydrationData = JSON.parse(jsonMatch[1]);
-          const user = rehydrationData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.userInfo?.user;
-          const targetUrl = user?.avatarLarger || user?.avatarMedium || user?.avatarThumb;
-          if (targetUrl) return targetUrl.replace(/\\u002F/g, '/');
+          const data = JSON.parse(jsonMatch[1]);
+          const scope = data?.['__DEFAULT_SCOPE__'];
+          const user =
+            scope?.['webapp.user-detail']?.userInfo?.user ||
+            scope?.['webapp.user-profile']?.userInfo?.user ||
+            null;
+          const url = decodeEscapedUrl(user?.avatarThumb || user?.avatarMedium || user?.avatarLarger || '');
+          if (isGoodAvatarUrl(url)) return url;
         }
       } catch (_) {}
 
-      const htmlMatch = html.match(/"avatarLarger":\s*"([^"]+)"/i)
-                     || html.match(/"avatarMedium":\s*"([^"]+)"/i)
-                     || html.match(/"avatarThumb":\s*"([^"]+)"/i)
-                     || html.match(/<meta\s+[^>]*?(?:property|name)=["']og:image["'][^>]*?content=["']([^"']+)["']/i);
+      // 2. SIGI_STATE
+      try {
+        const sigiMatch = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/i);
+        if (sigiMatch && sigiMatch[1]) {
+          const sigi = JSON.parse(sigiMatch[1]);
+          const usersMap = sigi?.UserModule?.users || {};
+          const user = usersMap[username] || Object.values(usersMap)[0];
+          const url = decodeEscapedUrl(user?.avatarThumb || user?.avatarMedium || user?.avatarLarger || '');
+          if (isGoodAvatarUrl(url)) return url;
+        }
+      } catch (_) {}
 
-      if (htmlMatch && htmlMatch[1]) {
-        return htmlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '').replace(/&amp;/g, '&');
+      // 3. Inline JSON / Embed HTML Regex
+      const patterns = [
+        /"avatarThumb"\s*:\s*"([^"]+)"/i,
+        /"avatarMedium"\s*:\s*"([^"]+)"/i,
+        /"avatarLarger"\s*:\s*"([^"]+)"/i,
+        /<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"/i,
+        /<img[^>]+src="([^"]+tiktokcdn[^"]+)"[^>]*>/i,
+        /<meta\s+[^>]*?(?:property|name)=["']og:image["'][^>]*?content=["']([^"']+)["']/i
+      ];
+
+      for (const rx of patterns) {
+        const m = html.match(rx);
+        if (m && m[1]) {
+          const candidate = decodeEscapedUrl(m[1]);
+          if (isGoodAvatarUrl(candidate)) return candidate;
+        }
       }
+
       return null;
     }
 
@@ -936,48 +1066,73 @@
       const u = cleanUsername(username);
       if (!u) return null;
 
-      try {
-        const res = await fetch(`/api/user/detail/?uniqueId=${encodeURIComponent(u)}&aid=1988`);
-        if (res.status === 429) return { rateLimited: true };
-        if (res.ok) {
-          const data = await res.json();
-          const user = data?.userInfo?.user;
-          const avatarUrl = user?.avatarLarger || user?.avatarMedium || user?.avatarThumb;
-          if (avatarUrl) return { url: avatarUrl.replace(/\\u002F/g, '/') };
-        }
-      } catch (_) {}
-
-      const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(u)}`;
-      try {
-        const pageRes = await fetch(profileUrl);
-        if (pageRes.status === 429) return { rateLimited: true };
-        if (pageRes.ok) {
-          const html = await pageRes.text();
-          const extracted = extractAvatarFromHtml(html);
-          if (extracted) return { url: extracted };
-        }
-      } catch (_) {}
-
-      // Pake CORS/CSP-free proxy_http fallback
+      // Tier 1: TikWM Public User Info API via proxy_http (CORS-free, no X-Bogus needed)
       if (__PAKE_INVOKE__) {
-        const proxied = await proxyGetText(profileUrl);
-        if (proxied.status === 429) return { rateLimited: true };
-        const extracted = extractAvatarFromHtml(proxied.text);
-        if (extracted) return { url: extracted };
+        const tikwm = await proxyGetJson(
+          `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent('@' + u)}`
+        );
+        const payload = tikwm?.data;
+        if (payload && payload.code === 0 && payload.data && payload.data.user) {
+          const usr = payload.data.user;
+          const url = decodeEscapedUrl(usr.avatarThumb || usr.avatarMedium || usr.avatarLarger || '');
+          if (isGoodAvatarUrl(url)) return { url, source: 'tikwm' };
+        }
+        if (payload && payload.code === -1 && /limit|frequent|too many/i.test(payload.msg || '')) {
+          return { rateLimited: true };
+        }
       }
 
-      return new Promise((resolve) => {
-        const unavatarUrl = `https://unavatar.io/tiktok/${encodeURIComponent(u)}`;
-        const testImg = new Image();
-        testImg.onload = () => resolve({ url: unavatarUrl });
-        testImg.onerror = () => resolve({ notFound: true });
-        testImg.src = unavatarUrl;
-      });
+      // Tier 2: Same-origin TikTok Creator Embed & Profile HTML via browser fetch()
+      for (const targetUrl of [
+        `https://www.tiktok.com/embed/@${encodeURIComponent(u)}`,
+        `https://www.tiktok.com/@${encodeURIComponent(u)}`
+      ]) {
+        try {
+          const pageRes = await fetch(targetUrl, { credentials: 'include' });
+          if (pageRes.status === 429) return { rateLimited: true };
+          if (pageRes.ok) {
+            const html = await pageRes.text();
+            const extracted = extractAvatarFromHtml(html, u);
+            if (extracted) return { url: extracted, source: 'tiktok-fetch' };
+          }
+        } catch (_) {}
+      }
+
+      // Tier 3: TikTok Embed & Profile HTML via Pake proxy_http with full Desktop headers
+      if (__PAKE_INVOKE__) {
+        const browserHeaders = {
+          'User-Agent':
+            navigator.userAgent ||
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9'
+        };
+        for (const targetUrl of [
+          `https://www.tiktok.com/embed/@${encodeURIComponent(u)}`,
+          `https://www.tiktok.com/@${encodeURIComponent(u)}`
+        ]) {
+          const proxied = await proxyGetText(targetUrl, browserHeaders);
+          if (proxied.status === 429) return { rateLimited: true };
+          const extracted = extractAvatarFromHtml(proxied.text, u);
+          if (extracted) return { url: extracted, source: 'tiktok-proxy' };
+        }
+
+        // Tier 4: Unavatar JSON API via proxy_http (last-resort fallback; avoids img-src CSP)
+        const unavatar = await proxyGetJson(
+          `https://unavatar.io/tiktok/${encodeURIComponent(u)}?json&fallback=false`
+        );
+        const uUrl = decodeEscapedUrl(unavatar?.data?.url || '');
+        if (isGoodAvatarUrl(uUrl)) {
+          return { url: uUrl, source: 'unavatar' };
+        }
+      }
+
+      return { notFound: true };
     }
 
     function applyAvatarToDOM(url, imgEl, placeholderEl) {
       if (!imgEl || !placeholderEl) return;
-      if (url && url !== 'NONE') {
+      if (isValidAvatarVal(url)) {
         imgEl.src = url;
         imgEl.style.display = 'block';
         placeholderEl.style.display = 'none';
@@ -989,7 +1144,8 @@
 
     function broadcastAvatarUpdate(username, url) {
       const u = cleanUsername(username);
-      document.querySelectorAll(`.tt-playlist-row[data-username="${CSS.escape ? CSS.escape(u) : u}"]`).forEach((row) => {
+      const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(u) : u;
+      document.querySelectorAll(`.tt-playlist-row[data-username="${escaped}"]`).forEach((row) => {
         const img = row.querySelector('.tt-playlist-avatar-img');
         const placeholder = row.querySelector('.tt-playlist-avatar-placeholder');
         applyAvatarToDOM(url, img, placeholder);
@@ -997,66 +1153,123 @@
     }
 
     /***************************************************************************
-     * Batch Sync Process
+     * Paced Lazy Queue (for visible rows) + Batch Sync Process
      ***************************************************************************/
-    async function startAvatarBatchSync() {
+    const lazyQueue = [];
+    const lazyQueuedSet = new Set();
+    let lazyWorkerRunning = false;
+
+    async function resolveAndStoreAvatar(u) {
+      const res = await fetchAvatarForUsername(u);
+      if (res?.rateLimited) return 'RATE_LIMITED';
+
+      if (res?.url && isGoodAvatarUrl(res.url)) {
+        // Show immediately using resolved CDN URL, then upgrade to Base64 in background if CORS allows
+        cacheAvatar(u, res.url);
+        broadcastAvatarUpdate(u, res.url);
+
+        convertUrlToBase64(res.url).then((base64Url) => {
+          if (base64Url && base64Url.startsWith('data:image')) {
+            cacheAvatar(u, base64Url);
+            broadcastAvatarUpdate(u, base64Url);
+          }
+        });
+        return 'OK';
+      }
+
+      sessionFailedSet.add(u);
+      return 'MISS';
+    }
+
+    async function runLazyQueue() {
+      if (lazyWorkerRunning) return;
+      lazyWorkerRunning = true;
+
+      while (lazyQueue.length > 0) {
+        if (isSyncing) {
+          // Batch sync handles missing avatars when active
+          lazyQueue.length = 0;
+          lazyQueuedSet.clear();
+          break;
+        }
+        const u = lazyQueue.shift();
+        lazyQueuedSet.delete(u);
+        if (!u || isValidAvatarVal(avatarCache[u]) || sessionFailedSet.has(u)) continue;
+
+        const status = await resolveAndStoreAvatar(u);
+        if (status === 'RATE_LIMITED') {
+          lazyQueue.unshift(u);
+          lazyQueuedSet.add(u);
+          await new Promise((r) => setTimeout(r, 4000));
+        } else {
+          await new Promise((r) => setTimeout(r, 1150));
+        }
+      }
+
+      lazyWorkerRunning = false;
+    }
+
+    function enqueueAvatarFetch(username) {
+      const u = cleanUsername(username);
+      if (!u || isSyncing) return;
+      if (isValidAvatarVal(avatarCache[u]) || sessionFailedSet.has(u) || lazyQueuedSet.has(u)) return;
+      lazyQueuedSet.add(u);
+      lazyQueue.push(u);
+      runLazyQueue();
+    }
+
+    async function startAvatarBatchSync(isManualClick = true) {
       if (isSyncing) {
-        syncAborted = true;
+        if (isManualClick) syncAborted = true;
         return;
       }
 
-      const usernames = playlist.map(cleanUsername).filter(Boolean);
+      if (isManualClick) {
+        sessionFailedSet.clear();
+      }
+
+      const usernames = Array.from(new Set(playlist.map(cleanUsername).filter(Boolean)));
       if (!usernames.length) return;
 
-      const missing = usernames.filter((u) => !avatarCache[u] || avatarCache[u] === 'NONE');
+      const missing = usernames.filter((u) => !isValidAvatarVal(avatarCache[u]));
       if (!missing.length) {
-        const btn = document.getElementById('tt-playlist-sync-btn');
-        if (btn) {
-          btn.textContent = '✅ All Cached';
-          setTimeout(() => updateSyncButtonLabel(), 1800);
+        if (isManualClick) {
+          const btn = document.getElementById('tt-playlist-sync-btn');
+          if (btn) {
+            btn.textContent = '✅ All Cached';
+            setTimeout(() => updateSyncButtonLabel(), 1800);
+          }
         }
         return;
       }
 
       isSyncing = true;
       syncAborted = false;
+      lazyQueue.length = 0;
+      lazyQueuedSet.clear();
       updateSyncButtonLabel();
 
       const queue = [...missing];
-      const CONCURRENCY = 1;
       let completedCount = usernames.length - missing.length;
       const totalCount = usernames.length;
 
-      async function worker() {
-        while (queue.length > 0 && !syncAborted) {
-          const u = queue.shift();
-          if (!u) break;
+      while (queue.length > 0 && !syncAborted) {
+        const u = queue.shift();
+        if (!u || isValidAvatarVal(avatarCache[u])) continue;
 
-          const res = await fetchAvatarForUsername(u);
-
-          if (res?.rateLimited) {
-            queue.unshift(u);
-            await new Promise((r) => setTimeout(r, 5000));
-            continue;
-          }
-
-          if (res?.url) {
-            const base64Url = await convertUrlToBase64(res.url);
-            cacheAvatar(u, base64Url);
-            broadcastAvatarUpdate(u, base64Url);
-            completedCount++;
-          } else if (res?.notFound) {
-            cacheAvatar(u, 'NONE');
-            completedCount++;
-          }
-
-          updateSyncButtonLabel(completedCount, totalCount);
-          await new Promise((r) => setTimeout(r, 1500));
+        const status = await resolveAndStoreAvatar(u);
+        if (status === 'RATE_LIMITED') {
+          queue.unshift(u);
+          await new Promise((r) => setTimeout(r, 4500));
+          continue;
         }
-      }
+        if (status === 'OK') {
+          completedCount++;
+        }
 
-      const workers = Array.from({ length: CONCURRENCY }, () => worker());
-      await Promise.all(workers);
+        updateSyncButtonLabel(completedCount, totalCount);
+        await new Promise((r) => setTimeout(r, 1150));
+      }
 
       isSyncing = false;
       syncAborted = false;
@@ -1064,9 +1277,9 @@
     }
 
     function getAvatarStats() {
-      const list = playlist.map(cleanUsername).filter(Boolean);
+      const list = Array.from(new Set(playlist.map(cleanUsername).filter(Boolean)));
       if (!list.length) return { cached: 0, total: 0 };
-      const cached = list.filter((u) => avatarCache[u] && avatarCache[u] !== 'NONE').length;
+      const cached = list.filter((u) => isValidAvatarVal(avatarCache[u])).length;
       return { cached, total: list.length };
     }
 
@@ -1085,14 +1298,14 @@
         btn.style.borderColor = VIBRANT_PINK;
       } else {
         btn.textContent = `⚡ Sync (${cur}/${tot})`;
-        btn.title = `Sync missing avatars (${cur} of ${tot} cached). Click to start.`;
+        btn.title = `Sync missing avatars (${cur} of ${tot} cached). Click to fetch.`;
         btn.style.background = cur === tot && tot > 0 ? 'rgba(37, 244, 238, 0.2)' : CARD_BG;
         btn.style.borderColor = cur === tot && tot > 0 ? TIKTOK_CYAN : BTN_BORDER;
       }
     }
 
     /***************************************************************************
-     * IntersectionObserver (Lazy-Loader for API Fallback)
+     * IntersectionObserver (Lazy-Loader via Paced Queue)
      ***************************************************************************/
     let avatarObserver = null;
     function getAvatarObserver(rootContainer) {
@@ -1103,17 +1316,8 @@
               const box = entry.target;
               avatarObserver.unobserve(box);
               const u = box.dataset.username;
-              const imgEl = box.querySelector('.tt-playlist-avatar-img');
-              const placeholderEl = box.querySelector('.tt-playlist-avatar-placeholder');
-
-              if (u && !avatarCache[u]) {
-                fetchAvatarForUsername(u).then(async (res) => {
-                  if (res?.url) {
-                    const base64Url = await convertUrlToBase64(res.url);
-                    cacheAvatar(u, base64Url);
-                    applyAvatarToDOM(base64Url, imgEl, placeholderEl);
-                  }
-                });
+              if (u && !isValidAvatarVal(avatarCache[u])) {
+                enqueueAvatarFetch(u);
               }
             }
           });
@@ -1302,7 +1506,7 @@
       // Sync Button
       const syncBtn = mkBtn('⚡ Sync');
       syncBtn.id = 'tt-playlist-sync-btn';
-      syncBtn.addEventListener('click', startAvatarBatchSync);
+      syncBtn.addEventListener('click', () => startAvatarBatchSync(true));
 
       // Avatars-Only Toggle
       const avatarOnlyBtn = mkBtn(loadAvatarOnly() ? '👤 Only' : '👤 + 📝');
@@ -1336,6 +1540,9 @@
       const clearBtn = mkBtn('Clear', '#7e0a0a');
       clearBtn.title = 'Clear playlist';
       clearBtn.addEventListener('click', () => {
+        if (isSyncing) syncAborted = true;
+        lazyQueue.length = 0;
+        lazyQueuedSet.clear();
         GM_deleteValue(STORAGE_LIST);
         GM_deleteValue(STORAGE_SCROLL);
         GM_deleteValue(STORAGE_LAST_INDEX);
@@ -1748,18 +1955,22 @@
             img.onerror = () => {
               img.style.display = 'none';
               placeholder.style.display = 'flex';
+              const curVal = avatarCache[u];
+              if (curVal && !curVal.startsWith('data:') && img.dataset.healed !== '1') {
+                img.dataset.healed = '1';
+                delete avatarCache[u];
+                idbDelete(u);
+                enqueueAvatarFetch(u);
+              }
             };
 
             avatarBox.append(placeholder, img);
 
             const cached = avatarCache[u];
-            if (cached && cached !== 'NONE') {
+            if (isValidAvatarVal(cached)) {
               img.src = cached;
               img.style.display = 'block';
               placeholder.style.display = 'none';
-            } else if (cached === 'NONE') {
-              placeholder.style.display = 'flex';
-              img.style.display = 'none';
             } else {
               observer.observe(avatarBox);
             }
@@ -1801,14 +2012,14 @@
     }
 
     /***************************************************************************
-     * Floating Controls & Upload
+     * Floating Draggable Controls & Upload
      ***************************************************************************/
     async function processBase64Queue(items) {
       for (const item of items) {
         if (avatarCache[item.username] && avatarCache[item.username].startsWith('data:image')) {
           continue;
         }
-        if (item.avatarUrl) {
+        if (item.avatarUrl && isGoodAvatarUrl(item.avatarUrl)) {
           const base64 = await convertUrlToBase64(item.avatarUrl);
           if (base64 && base64.startsWith('data:image')) {
             cacheAvatar(item.username, base64);
@@ -1832,16 +2043,12 @@
         }));
 
         parsedData.forEach((item) => {
-          if (item.avatarUrl && !avatarCache[item.username]) {
-            avatarCache[item.username] = item.avatarUrl;
-            idbPut(item.username, item.avatarUrl);
+          if (item.avatarUrl && isGoodAvatarUrl(item.avatarUrl) && !isValidAvatarVal(avatarCache[item.username])) {
+            cacheAvatar(item.username, item.avatarUrl);
           }
         });
 
-        try {
-          window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(avatarCache));
-        } catch (_) {}
-
+        sessionFailedSet.clear();
         currentIndex = -1;
         selectedCategory = '';
         GM_deleteValue(STORAGE_SELECTED_CAT);
@@ -1857,6 +2064,11 @@
         updateSyncButtonLabel();
 
         processBase64Queue(parsedData);
+
+        // Auto-fetch missing avatars right after loading a list
+        if (playlist.some((item) => !isValidAvatarVal(avatarCache[item.username]))) {
+          startAvatarBatchSync(false);
+        }
       };
       reader.readAsText(file);
     }
@@ -1866,7 +2078,25 @@
       if (!toggleBtn) return;
       const vis = loadVis();
       toggleBtn.textContent = vis ? '◀' : '▶';
-      toggleBtn.title       = vis ? 'Hide Playlist' : 'Show Playlist';
+      toggleBtn.title       = vis ? 'Hide Playlist (Ctrl+Drag to move)' : 'Show Playlist (Ctrl+Drag to move)';
+    }
+
+    function applyCtrlGeom(controls) {
+      if (!controls) return;
+      const g = loadCtrlGeom();
+      if (g.left) {
+        const maxL = Math.max(0, window.innerWidth - (controls.offsetWidth || 36));
+        const maxT = Math.max(0, window.innerHeight - (controls.offsetHeight || 80));
+        const clampedL = Math.max(0, Math.min(parseFloat(g.left) || 0, maxL));
+        const clampedT = Math.max(0, Math.min(parseFloat(g.top) || 14, maxT));
+        controls.style.left = `${clampedL}px`;
+        controls.style.top  = `${clampedT}px`;
+        controls.style.right = 'auto';
+      } else {
+        controls.style.left  = '';
+        controls.style.top   = g.top || defaultCtrlGeom.top;
+        controls.style.right = g.right || defaultCtrlGeom.right;
+      }
     }
 
     function initControls() {
@@ -1878,7 +2108,8 @@
         id: 'tt-playlist-controls',
         style: {
           position: 'fixed', top: '14px', right: '260px', zIndex: '2147483646',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px'
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
+          userSelect: 'none'
         }
       });
 
@@ -1886,9 +2117,23 @@
         controls.addEventListener(evt, (e) => e.stopPropagation());
       });
 
+      // Dedicated compact drag handle (plus Ctrl+Click / Shift+Click on any button)
+      const dragHandle = el('div', {
+        id: 'tt-playlist-controls-drag',
+        textContent: '⠿',
+        title: 'Drag to move controls anywhere (or Ctrl+Click & Hold any button). Double-click to reset.',
+        style: {
+          width: '32px', height: '14px', borderRadius: '4px',
+          background: BTN_BG, color: TEXT_SEC, border: `1px solid ${BTN_BORDER}`,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: '11px', lineHeight: '1', cursor: 'grab',
+          userSelect: 'none', touchAction: 'none', boxSizing: 'border-box'
+        }
+      });
+
       const fileInput = el('input', { type: 'file', accept: '.txt,.md,.tsv', style: { display: 'none' } });
       const uploadLabel = el('label', {
-        title: 'Upload grouped or TSV playlist (.txt, .md, .tsv)',
+        title: 'Upload grouped or TSV playlist (.txt, .md, .tsv) — Ctrl+Drag to move',
         textContent: '📂',
         style: {
           minWidth: '32px', minHeight: '28px', borderRadius: '4px',
@@ -1902,7 +2147,7 @@
       const toggleBtn = el('button', {
         id: 'tt-playlist-toggle-btn',
         textContent: loadVis() ? '◀' : '▶',
-        title: loadVis() ? 'Hide Playlist' : 'Show Playlist',
+        title: loadVis() ? 'Hide Playlist (Ctrl+Drag to move)' : 'Show Playlist (Ctrl+Drag to move)',
         style: {
           minWidth: '32px', minHeight: '28px', fontSize: '12px',
           border: `1px solid ${BTN_BORDER}`, borderRadius: '4px',
@@ -1910,6 +2155,74 @@
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           lineHeight: '1', touchAction: 'manipulation', boxSizing: 'border-box'
         }
+      });
+
+      // Drag controller for controls (via dragHandle OR Ctrl/Shift + Click & Hold on buttons)
+      let ctrlDragging = false;
+      let ctrlMoved = false;
+      let ctrlStartX = 0, ctrlStartY = 0, ctrlInitLeft = 0, ctrlInitTop = 0;
+
+      controls.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        const onHandle = e.target === dragHandle;
+        const modifierHeld = e.ctrlKey || e.shiftKey;
+        if (!onHandle && !modifierHeld) return;
+
+        ctrlDragging = true;
+        ctrlMoved = false;
+        ctrlStartX = e.clientX;
+        ctrlStartY = e.clientY;
+        const rect = controls.getBoundingClientRect();
+        ctrlInitLeft = rect.left;
+        ctrlInitTop = rect.top;
+
+        dragHandle.style.cursor = 'grabbing';
+        controls.style.right = 'auto';
+        controls.style.left  = `${ctrlInitLeft}px`;
+        controls.style.top   = `${ctrlInitTop}px`;
+        e.preventDefault();
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!ctrlDragging) return;
+        const dx = e.clientX - ctrlStartX;
+        const dy = e.clientY - ctrlStartY;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) ctrlMoved = true;
+
+        const maxL = Math.max(0, window.innerWidth - controls.offsetWidth);
+        const maxT = Math.max(0, window.innerHeight - controls.offsetHeight);
+        const newL = Math.max(0, Math.min(ctrlInitLeft + dx, maxL));
+        const newT = Math.max(0, Math.min(ctrlInitTop + dy, maxT));
+        controls.style.left = `${newL}px`;
+        controls.style.top  = `${newT}px`;
+      });
+
+      window.addEventListener('mouseup', () => {
+        if (!ctrlDragging) return;
+        ctrlDragging = false;
+        dragHandle.style.cursor = 'grab';
+        if (ctrlMoved) {
+          saveCtrlGeom({
+            left: controls.style.left,
+            top: controls.style.top,
+            right: 'auto'
+          });
+          setTimeout(() => { ctrlMoved = false; }, 60);
+        }
+      });
+
+      // Suppress button click when Ctrl/Shift+Dragging so file dialog / toggle doesn't fire
+      controls.addEventListener('click', (e) => {
+        if (ctrlMoved || e.ctrlKey || e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }, true);
+
+      dragHandle.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        saveCtrlGeom(defaultCtrlGeom);
+        applyCtrlGeom(controls);
       });
 
       toggleBtn.addEventListener('click', () => {
@@ -1922,8 +2235,11 @@
         if (newState) renderList();
       });
 
-      controls.append(uploadLabel, toggleBtn);
+      controls.append(dragHandle, uploadLabel, toggleBtn);
       rootTarget.appendChild(controls);
+      applyCtrlGeom(controls);
+
+      window.addEventListener('resize', () => applyCtrlGeom(controls));
 
       uploadLabel.addEventListener('dragover',  (e) => { e.preventDefault(); uploadLabel.style.opacity = '0.6'; });
       uploadLabel.addEventListener('dragleave', ()  => { uploadLabel.style.opacity = '1'; });
@@ -2008,6 +2324,7 @@
         sidebar.style.height = g.height;
         sidebar.style.fontFamily = loadFFam();
       }
+      applyCtrlGeom(document.getElementById('tt-playlist-controls'));
       updateToggleBtn();
     }
 
