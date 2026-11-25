@@ -1,8 +1,8 @@
 // ==UserScript Adapted for Pake==
 // @name         Final Tiktok Playlist (TSV Avatar Import Edition) — Pake Edition
 // @namespace    belay m.
-// @version      2.8.0-pake
-// @description  TikTok playlist with category grouping, category filter dropdown, multi-tier Pake avatar sync, persistent KV + IndexedDB storage, wheel-scroll isolation, avatars-only mode, font controls, draggable controls, and TSV avatar import support.
+// @version      2.9.0-pake
+// @description  TikTok playlist with category grouping, category filter dropdown, verified multi-tier Pake avatar sync, persistent KV + IndexedDB v2 storage, wheel-scroll isolation, avatars-only mode, font controls, draggable controls, and TSV avatar import support.
 // @match        https://www.tiktok.com/*
 // @match        *://*.tiktok.com/*
 // ==/UserScript Adapted for Pake==
@@ -489,7 +489,7 @@
   };
 
   /* =========================================================================
-     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v2.8.0
+     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v2.9.0
      ========================================================================= */
   (function () {
     'use strict';
@@ -504,14 +504,16 @@
     const STORAGE_COLS         = 'tt_playlist_cols';
     const STORAGE_FSIZE        = 'tt_playlist_fsize';
     const STORAGE_FFAM         = 'tt_playlist_ffam';
-    const STORAGE_AVATARS      = 'tt_playlist_avatars';
+    const STORAGE_AVATARS_V1   = 'tt_playlist_avatars';
+    const STORAGE_AVATARS      = 'tt_playlist_avatars_v2';
     const STORAGE_GEOM         = 'tt_playlist_geom';
     const STORAGE_CTRL_GEOM    = 'tt_playlist_ctrl_geom';
     const STORAGE_AVATAR_ONLY  = 'tt_playlist_avatar_only';
     const STORAGE_SELECTED_CAT = 'tt_playlist_selected_cat';
 
     const DB_NAME              = 'TT_Playlist_Avatars_DB';
-    const DB_STORE             = 'avatars_store';
+    const DB_VERSION           = 2;
+    const DB_STORE             = 'avatars_store_v2';
 
     const VIBRANT_PINK   = '#fe2c55';
     const TIKTOK_CYAN    = '#25f4ee';
@@ -548,6 +550,7 @@
     let selectedCategory = String(GM_getValue(STORAGE_SELECTED_CAT, '') || '');
     let isSyncing        = false;
     let syncAborted      = false;
+    let tikwmCooldownUntil = 0;
 
     const sessionFailedSet = new Set();
 
@@ -628,12 +631,27 @@
       return node;
     }
 
+    function isUrlExpired(url) {
+      if (!url || typeof url !== 'string') return true;
+      if (url.startsWith('data:image')) return false;
+      if (!url.startsWith('http')) return true;
+      const m = url.match(/[?&]x-expires=(\d+)/i);
+      if (m && m[1]) {
+        const expSec = parseInt(m[1], 10);
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (Number.isFinite(expSec) && expSec > 1000000000 && expSec <= nowSec + 60) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     function isValidAvatarVal(val) {
       return (
         typeof val === 'string' &&
         val.length > 0 &&
         val !== 'NONE' &&
-        (val.startsWith('http') || val.startsWith('data:image'))
+        (val.startsWith('data:image') || (val.startsWith('http') && !isUrlExpired(val)))
       );
     }
 
@@ -658,7 +676,6 @@
         if (!line) continue;
         if (/^[-*_]{3,}$/.test(line)) continue;
 
-        // Detect TSV format (username \t avatar_url \t profile_url)
         if (line.includes('\t')) {
           const parts = line.split('\t');
           const rawUsername = parts[0] ? parts[0].trim() : '';
@@ -725,28 +742,38 @@
     }
 
     /***************************************************************************
-     * Dual Storage: In-Memory + IndexedDB + LocalStorage (keeps large Base64 blobs out of KV JSON)
+     * Dual Storage v2: Clean Verified Cache (In-Memory + IndexedDB v2 + LocalStorage v2)
+     * Automatically migrates permanent Base64 entries from v1 while dropping stale v1 URLs
      ***************************************************************************/
     let avatarCache = (() => {
+      const clean = {};
       try {
-        const raw = window.localStorage.getItem(STORAGE_AVATARS);
-        if (!raw) return {};
-        const parsed = parseMaybeJson(raw, {});
-        if (!parsed || typeof parsed !== 'object') return {};
-        // Purge any poisoned 'NONE' entries from older versions
-        const clean = {};
-        let purged = false;
-        for (const [k, v] of Object.entries(parsed)) {
-          if (isValidAvatarVal(v)) clean[k] = v;
-          else purged = true;
+        const rawV2 = window.localStorage.getItem(STORAGE_AVATARS);
+        if (rawV2) {
+          const parsedV2 = parseMaybeJson(rawV2, {});
+          if (parsedV2 && typeof parsedV2 === 'object') {
+            for (const [k, v] of Object.entries(parsedV2)) {
+              if (isValidAvatarVal(v)) clean[k] = v;
+            }
+          }
+        } else {
+          // One-time migration from v1: preserve ONLY permanent Base64 images (skip expired/broken v1 URLs)
+          const rawV1 = window.localStorage.getItem(STORAGE_AVATARS_V1);
+          if (rawV1) {
+            const parsedV1 = parseMaybeJson(rawV1, {});
+            if (parsedV1 && typeof parsedV1 === 'object') {
+              for (const [k, v] of Object.entries(parsedV1)) {
+                if (typeof v === 'string' && v.startsWith('data:image')) {
+                  clean[k] = v;
+                }
+              }
+            }
+            window.localStorage.removeItem(STORAGE_AVATARS_V1);
+          }
+          window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(clean));
         }
-        if (purged) {
-          try { window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(clean)); } catch (_) {}
-        }
-        return clean;
-      } catch (_) {
-        return {};
-      }
+      } catch (_) {}
+      return clean;
     })();
 
     let idbInstance = null;
@@ -755,10 +782,11 @@
       if (typeof indexedDB === 'undefined') return Promise.resolve(null);
       return new Promise((resolve) => {
         try {
-          const req = indexedDB.open(DB_NAME, 1);
+          const req = indexedDB.open(DB_NAME, DB_VERSION);
           req.onupgradeneeded = () => {
-            if (!req.result.objectStoreNames.contains(DB_STORE)) {
-              req.result.createObjectStore(DB_STORE);
+            const db = req.result;
+            if (!db.objectStoreNames.contains(DB_STORE)) {
+              db.createObjectStore(DB_STORE);
             }
           };
           req.onsuccess = () => {
@@ -793,6 +821,16 @@
       });
     }
 
+    function idbClearAll() {
+      getIDB().then((db) => {
+        if (!db) return;
+        try {
+          const tx = db.transaction(DB_STORE, 'readwrite');
+          tx.objectStore(DB_STORE).clear();
+        } catch (_) {}
+      });
+    }
+
     getIDB().then((db) => {
       if (!db) return;
       try {
@@ -808,7 +846,6 @@
                 broadcastAvatarUpdate(cursor.key, cursor.value);
               }
             } else {
-              // Purge poisoned 'NONE' / invalid entries from IndexedDB
               try { cursor.delete(); } catch (_) {}
             }
             cursor.continue();
@@ -820,6 +857,16 @@
     });
 
     let avatarSaveTimer = null;
+    function schedulePersistAvatarCache() {
+      clearTimeout(avatarSaveTimer);
+      avatarSaveTimer = setTimeout(() => {
+        try {
+          window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(avatarCache));
+        } catch (_) {}
+        updateSyncButtonLabel();
+      }, 300);
+    }
+
     function cacheAvatar(username, url) {
       if (!username || !isValidAvatarVal(url)) return;
       const u = cleanUsername(username);
@@ -828,21 +875,59 @@
       sessionFailedSet.delete(u);
 
       idbPut(u, url);
+      schedulePersistAvatarCache();
+    }
 
-      clearTimeout(avatarSaveTimer);
-      avatarSaveTimer = setTimeout(() => {
-        try {
-          window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(avatarCache));
-        } catch (_) {
-          // LocalStorage quota reached; IndexedDB remains active
-        }
-        updateSyncButtonLabel();
-      }, 300);
+    function purgeAvatarEntry(username) {
+      const u = cleanUsername(username);
+      if (!u) return;
+      delete avatarCache[u];
+      idbDelete(u);
+      schedulePersistAvatarCache();
+    }
+
+    function wipeAllAvatarCache() {
+      if (isSyncing) syncAborted = true;
+      lazyQueue.length = 0;
+      lazyQueuedSet.clear();
+      sessionFailedSet.clear();
+      avatarCache = {};
+      try {
+        window.localStorage.removeItem(STORAGE_AVATARS_V1);
+        window.localStorage.removeItem(STORAGE_AVATARS);
+      } catch (_) {}
+      idbClearAll();
+      renderList();
+      updateSyncButtonLabel();
     }
 
     /***************************************************************************
-     * Long-Term Storage: Base64 Conversion Engine (non-blocking upgrade)
+     * Image Verification & Base64 Conversion Engine
      ***************************************************************************/
+    function verifyImageLoads(url) {
+      if (!url || typeof url !== 'string') return Promise.resolve(false);
+      if (url.startsWith('data:image')) return Promise.resolve(true);
+      if (isUrlExpired(url)) return Promise.resolve(false);
+
+      return new Promise((resolve) => {
+        const testImg = new Image();
+        testImg.referrerPolicy = 'no-referrer';
+        let settled = false;
+        const done = (ok) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          testImg.onload = null;
+          testImg.onerror = null;
+          resolve(ok);
+        };
+        const timer = setTimeout(() => done(false), 7000);
+        testImg.onload = () => done(testImg.naturalWidth > 0);
+        testImg.onerror = () => done(false);
+        testImg.src = url;
+      });
+    }
+
     async function convertUrlToBase64(url) {
       if (!url || url.startsWith('data:image')) return url;
       return new Promise((resolve) => {
@@ -896,7 +981,7 @@
       if (url.startsWith('data:image')) return true;
       if (!url.startsWith('http')) return false;
       if (/default[-_]avatar|tiktok[-_]logo|tt[-_]logo|webapp-desktop/i.test(url)) return false;
-      return true;
+      return !isUrlExpired(url);
     }
 
     function harvestAvatarsFromDOM() {
@@ -950,9 +1035,9 @@
     }
 
     /***************************************************************************
-     * Multi-Tier Pake Avatar Resolution Engine
-     *   Tier 1: TikWM User Info API via Rust proxy_http (no X-Bogus / CORS)
-     *   Tier 2: TikTok Profile & Embed HTML via browser fetch()
+     * Multi-Tier Pake Avatar Resolution Engine (All URLs Verified Before Caching)
+     *   Tier 1: TikWM User Info API via Rust proxy_http (with rate-limit cooldown)
+     *   Tier 2: TikTok Embed & Profile HTML via browser fetch()
      *   Tier 3: TikTok Embed & Profile HTML via proxy_http with Desktop headers
      *   Tier 4: Unavatar JSON API via proxy_http (bypasses img-src CSP)
      ***************************************************************************/
@@ -1011,8 +1096,14 @@
         .trim();
     }
 
-    function extractAvatarFromHtml(html, username) {
-      if (!html || typeof html !== 'string') return null;
+    function extractAvatarCandidatesFromHtml(html, username) {
+      const candidates = [];
+      const push = (raw) => {
+        const u = decodeEscapedUrl(raw);
+        if (isGoodAvatarUrl(u) && !candidates.includes(u)) candidates.push(u);
+      };
+
+      if (!html || typeof html !== 'string') return candidates;
 
       // 1. __UNIVERSAL_DATA_FOR_REHYDRATION__
       try {
@@ -1024,8 +1115,9 @@
             scope?.['webapp.user-detail']?.userInfo?.user ||
             scope?.['webapp.user-profile']?.userInfo?.user ||
             null;
-          const url = decodeEscapedUrl(user?.avatarThumb || user?.avatarMedium || user?.avatarLarger || '');
-          if (isGoodAvatarUrl(url)) return url;
+          push(user?.avatarThumb);
+          push(user?.avatarMedium);
+          push(user?.avatarLarger);
         }
       } catch (_) {}
 
@@ -1036,8 +1128,9 @@
           const sigi = JSON.parse(sigiMatch[1]);
           const usersMap = sigi?.UserModule?.users || {};
           const user = usersMap[username] || Object.values(usersMap)[0];
-          const url = decodeEscapedUrl(user?.avatarThumb || user?.avatarMedium || user?.avatarLarger || '');
-          if (isGoodAvatarUrl(url)) return url;
+          push(user?.avatarThumb);
+          push(user?.avatarMedium);
+          push(user?.avatarLarger);
         }
       } catch (_) {}
 
@@ -1053,12 +1146,17 @@
 
       for (const rx of patterns) {
         const m = html.match(rx);
-        if (m && m[1]) {
-          const candidate = decodeEscapedUrl(m[1]);
-          if (isGoodAvatarUrl(candidate)) return candidate;
-        }
+        if (m && m[1]) push(m[1]);
       }
 
+      return candidates;
+    }
+
+    async function pickFirstLoadable(urls) {
+      for (const candidate of urls) {
+        if (!isGoodAvatarUrl(candidate)) continue;
+        if (await verifyImageLoads(candidate)) return candidate;
+      }
       return null;
     }
 
@@ -1066,19 +1164,33 @@
       const u = cleanUsername(username);
       if (!u) return null;
 
-      // Tier 1: TikWM Public User Info API via proxy_http (CORS-free, no X-Bogus needed)
-      if (__PAKE_INVOKE__) {
+      let sawRateLimit = false;
+      const ua =
+        navigator.userAgent ||
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0';
+
+      // Tier 1: TikWM Public User Info API via proxy_http
+      if (__PAKE_INVOKE__ && Date.now() >= tikwmCooldownUntil) {
         const tikwm = await proxyGetJson(
-          `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent('@' + u)}`
+          `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent('@' + u)}`,
+          { 'User-Agent': ua, Referer: 'https://www.tikwm.com/' }
         );
         const payload = tikwm?.data;
         if (payload && payload.code === 0 && payload.data && payload.data.user) {
           const usr = payload.data.user;
-          const url = decodeEscapedUrl(usr.avatarThumb || usr.avatarMedium || usr.avatarLarger || '');
-          if (isGoodAvatarUrl(url)) return { url, source: 'tikwm' };
-        }
-        if (payload && payload.code === -1 && /limit|frequent|too many/i.test(payload.msg || '')) {
-          return { rateLimited: true };
+          const rawList = [usr.avatarThumb, usr.avatarMedium, usr.avatarLarger, usr.avatar]
+            .map((x) => {
+              const s = decodeEscapedUrl(x || '');
+              return s.startsWith('/') ? `https://www.tikwm.com${s}` : s;
+            });
+          const okUrl = await pickFirstLoadable(rawList);
+          if (okUrl) return { url: okUrl, source: 'tikwm' };
+        } else if (
+          tikwm?.status === 429 ||
+          (payload && payload.code === -1 && /limit|frequent|too many/i.test(payload.msg || ''))
+        ) {
+          sawRateLimit = true;
+          tikwmCooldownUntil = Date.now() + 30000;
         }
       }
 
@@ -1089,11 +1201,15 @@
       ]) {
         try {
           const pageRes = await fetch(targetUrl, { credentials: 'include' });
-          if (pageRes.status === 429) return { rateLimited: true };
+          if (pageRes.status === 429) {
+            sawRateLimit = true;
+            continue;
+          }
           if (pageRes.ok) {
             const html = await pageRes.text();
-            const extracted = extractAvatarFromHtml(html, u);
-            if (extracted) return { url: extracted, source: 'tiktok-fetch' };
+            const candidates = extractAvatarCandidatesFromHtml(html, u);
+            const okUrl = await pickFirstLoadable(candidates);
+            if (okUrl) return { url: okUrl, source: 'tiktok-fetch' };
           }
         } catch (_) {}
       }
@@ -1101,9 +1217,7 @@
       // Tier 3: TikTok Embed & Profile HTML via Pake proxy_http with full Desktop headers
       if (__PAKE_INVOKE__) {
         const browserHeaders = {
-          'User-Agent':
-            navigator.userAgent ||
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+          'User-Agent': ua,
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9'
         };
@@ -1112,31 +1226,38 @@
           `https://www.tiktok.com/@${encodeURIComponent(u)}`
         ]) {
           const proxied = await proxyGetText(targetUrl, browserHeaders);
-          if (proxied.status === 429) return { rateLimited: true };
-          const extracted = extractAvatarFromHtml(proxied.text, u);
-          if (extracted) return { url: extracted, source: 'tiktok-proxy' };
+          if (proxied.status === 429) {
+            sawRateLimit = true;
+            continue;
+          }
+          const candidates = extractAvatarCandidatesFromHtml(proxied.text, u);
+          const okUrl = await pickFirstLoadable(candidates);
+          if (okUrl) return { url: okUrl, source: 'tiktok-proxy' };
         }
 
         // Tier 4: Unavatar JSON API via proxy_http (last-resort fallback; avoids img-src CSP)
         const unavatar = await proxyGetJson(
-          `https://unavatar.io/tiktok/${encodeURIComponent(u)}?json&fallback=false`
+          `https://unavatar.io/tiktok/${encodeURIComponent(u)}?json&fallback=false`,
+          { 'User-Agent': ua }
         );
         const uUrl = decodeEscapedUrl(unavatar?.data?.url || '');
-        if (isGoodAvatarUrl(uUrl)) {
+        if (isGoodAvatarUrl(uUrl) && (await verifyImageLoads(uUrl))) {
           return { url: uUrl, source: 'unavatar' };
         }
       }
 
-      return { notFound: true };
+      return sawRateLimit ? { rateLimited: true } : { notFound: true };
     }
 
     function applyAvatarToDOM(url, imgEl, placeholderEl) {
       if (!imgEl || !placeholderEl) return;
       if (isValidAvatarVal(url)) {
+        // Keep img hidden until onload succeeds so broken-image icon never flickers
+        imgEl.style.display = 'none';
+        placeholderEl.style.display = 'flex';
         imgEl.src = url;
-        imgEl.style.display = 'block';
-        placeholderEl.style.display = 'none';
       } else {
+        imgEl.removeAttribute('src');
         imgEl.style.display = 'none';
         placeholderEl.style.display = 'flex';
       }
@@ -1164,7 +1285,6 @@
       if (res?.rateLimited) return 'RATE_LIMITED';
 
       if (res?.url && isGoodAvatarUrl(res.url)) {
-        // Show immediately using resolved CDN URL, then upgrade to Base64 in background if CORS allows
         cacheAvatar(u, res.url);
         broadcastAvatarUpdate(u, res.url);
 
@@ -1187,7 +1307,6 @@
 
       while (lazyQueue.length > 0) {
         if (isSyncing) {
-          // Batch sync handles missing avatars when active
           lazyQueue.length = 0;
           lazyQueuedSet.clear();
           break;
@@ -1200,9 +1319,9 @@
         if (status === 'RATE_LIMITED') {
           lazyQueue.unshift(u);
           lazyQueuedSet.add(u);
-          await new Promise((r) => setTimeout(r, 4000));
+          await new Promise((r) => setTimeout(r, 3500));
         } else {
-          await new Promise((r) => setTimeout(r, 1150));
+          await new Promise((r) => setTimeout(r, 1100));
         }
       }
 
@@ -1260,7 +1379,7 @@
         const status = await resolveAndStoreAvatar(u);
         if (status === 'RATE_LIMITED') {
           queue.unshift(u);
-          await new Promise((r) => setTimeout(r, 4500));
+          await new Promise((r) => setTimeout(r, 4000));
           continue;
         }
         if (status === 'OK') {
@@ -1268,7 +1387,7 @@
         }
 
         updateSyncButtonLabel(completedCount, totalCount);
-        await new Promise((r) => setTimeout(r, 1150));
+        await new Promise((r) => setTimeout(r, 1100));
       }
 
       isSyncing = false;
@@ -1293,12 +1412,12 @@
 
       if (isSyncing) {
         btn.textContent = `⏳ ${cur}/${tot}`;
-        btn.title = 'Fetching missing avatars... Click to pause.';
+        btn.title = 'Fetching & verifying avatars... Click to pause.';
         btn.style.background = 'rgba(254, 44, 85, 0.35)';
         btn.style.borderColor = VIBRANT_PINK;
       } else {
         btn.textContent = `⚡ Sync (${cur}/${tot})`;
-        btn.title = `Sync missing avatars (${cur} of ${tot} cached). Click to fetch.`;
+        btn.title = `Sync missing avatars (${cur} of ${tot} verified). Click to fetch.`;
         btn.style.background = cur === tot && tot > 0 ? 'rgba(37, 244, 238, 0.2)' : CARD_BG;
         btn.style.borderColor = cur === tot && tot > 0 ? TIKTOK_CYAN : BTN_BORDER;
       }
@@ -1536,10 +1655,10 @@
         renderList();
       });
 
-      // Clear
+      // Clear Playlist
       const clearBtn = mkBtn('Clear', '#7e0a0a');
-      clearBtn.title = 'Clear playlist';
-      clearBtn.addEventListener('click', () => {
+      clearBtn.title = 'Clear playlist (hold Ctrl to also wipe cached avatars)';
+      clearBtn.addEventListener('click', (e) => {
         if (isSyncing) syncAborted = true;
         lazyQueue.length = 0;
         lazyQueuedSet.clear();
@@ -1550,15 +1669,19 @@
         playlist         = [];
         currentIndex     = -1;
         selectedCategory = '';
-        renderList();
-        updateSyncButtonLabel();
+        if (e.ctrlKey || e.shiftKey) {
+          wipeAllAvatarCache();
+        } else {
+          renderList();
+          updateSyncButtonLabel();
+        }
       });
 
       btnGroup.append(uploadBtn, syncBtn, avatarOnlyBtn, colBtn, clearBtn);
       header.append(titleArea, btnGroup);
       sidebar.appendChild(header);
 
-      // --- Search & Category Controls ---
+      // --- Search, Wipe Cache & Category Controls ---
       const searchRow = el('div', {
         style: { display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '5px', flexShrink: '0' }
       });
@@ -1586,7 +1709,12 @@
         renderList();
       });
 
-      searchRow.append(searchInput, clearSearchBtn);
+      const wipeCacheBtn = mkBtn('🧹', CARD_BG);
+      wipeCacheBtn.style.padding = '3px 6px';
+      wipeCacheBtn.title = 'Wipe all cached avatars (resets Sync to 0)';
+      wipeCacheBtn.addEventListener('click', wipeAllAvatarCache);
+
+      searchRow.append(searchInput, clearSearchBtn, wipeCacheBtn);
       sidebar.appendChild(searchRow);
 
       // Category Selector
@@ -1952,15 +2080,26 @@
               display:      'none'
             });
 
+            // Show only after onload confirms a valid decoded image (zero broken-image flicker)
+            img.onload = () => {
+              if (img.naturalWidth > 0) {
+                img.style.display = 'block';
+                placeholder.style.display = 'none';
+              } else {
+                img.style.display = 'none';
+                placeholder.style.display = 'flex';
+              }
+            };
+
             img.onerror = () => {
               img.style.display = 'none';
               placeholder.style.display = 'flex';
-              const curVal = avatarCache[u];
-              if (curVal && !curVal.startsWith('data:') && img.dataset.healed !== '1') {
-                img.dataset.healed = '1';
-                delete avatarCache[u];
-                idbDelete(u);
-                enqueueAvatarFetch(u);
+              if (avatarCache[u] && !avatarCache[u].startsWith('data:')) {
+                purgeAvatarEntry(u);
+                if (img.dataset.healed !== '1') {
+                  img.dataset.healed = '1';
+                  enqueueAvatarFetch(u);
+                }
               }
             };
 
@@ -1969,8 +2108,6 @@
             const cached = avatarCache[u];
             if (isValidAvatarVal(cached)) {
               img.src = cached;
-              img.style.display = 'block';
-              placeholder.style.display = 'none';
             } else {
               observer.observe(avatarBox);
             }
@@ -2014,25 +2151,30 @@
     /***************************************************************************
      * Floating Draggable Controls & Upload
      ***************************************************************************/
-    async function processBase64Queue(items) {
+    async function processTsvAvatarQueue(items) {
       for (const item of items) {
         if (avatarCache[item.username] && avatarCache[item.username].startsWith('data:image')) {
           continue;
         }
         if (item.avatarUrl && isGoodAvatarUrl(item.avatarUrl)) {
-          const base64 = await convertUrlToBase64(item.avatarUrl);
-          if (base64 && base64.startsWith('data:image')) {
-            cacheAvatar(item.username, base64);
-            broadcastAvatarUpdate(item.username, base64);
+          const ok = await verifyImageLoads(item.avatarUrl);
+          if (ok) {
+            cacheAvatar(item.username, item.avatarUrl);
+            broadcastAvatarUpdate(item.username, item.avatarUrl);
+            const base64 = await convertUrlToBase64(item.avatarUrl);
+            if (base64 && base64.startsWith('data:image')) {
+              cacheAvatar(item.username, base64);
+              broadcastAvatarUpdate(item.username, base64);
+            }
           }
         }
-        await new Promise((r) => setTimeout(r, 250));
+        await new Promise((r) => setTimeout(r, 120));
       }
     }
 
     function handleFile(file) {
       const reader = new FileReader();
-      reader.onload = (e) => {
+      reader.onload = async (e) => {
         const rawText = e.target?.result || '';
         const parsedData = parsePlaylistText(rawText);
 
@@ -2041,12 +2183,6 @@
           category: item.category || 'General',
           mainCategory: item.mainCategory || 'General'
         }));
-
-        parsedData.forEach((item) => {
-          if (item.avatarUrl && isGoodAvatarUrl(item.avatarUrl) && !isValidAvatarVal(avatarCache[item.username])) {
-            cacheAvatar(item.username, item.avatarUrl);
-          }
-        });
 
         sessionFailedSet.clear();
         currentIndex = -1;
@@ -2063,9 +2199,10 @@
         renderList();
         updateSyncButtonLabel();
 
-        processBase64Queue(parsedData);
+        if (parsedData.some((x) => x.avatarUrl)) {
+          await processTsvAvatarQueue(parsedData);
+        }
 
-        // Auto-fetch missing avatars right after loading a list
         if (playlist.some((item) => !isValidAvatarVal(avatarCache[item.username]))) {
           startAvatarBatchSync(false);
         }
@@ -2117,7 +2254,6 @@
         controls.addEventListener(evt, (e) => e.stopPropagation());
       });
 
-      // Dedicated compact drag handle (plus Ctrl+Click / Shift+Click on any button)
       const dragHandle = el('div', {
         id: 'tt-playlist-controls-drag',
         textContent: '⠿',
@@ -2157,7 +2293,6 @@
         }
       });
 
-      // Drag controller for controls (via dragHandle OR Ctrl/Shift + Click & Hold on buttons)
       let ctrlDragging = false;
       let ctrlMoved = false;
       let ctrlStartX = 0, ctrlStartY = 0, ctrlInitLeft = 0, ctrlInitTop = 0;
@@ -2211,7 +2346,6 @@
         }
       });
 
-      // Suppress button click when Ctrl/Shift+Dragging so file dialog / toggle doesn't fire
       controls.addEventListener('click', (e) => {
         if (ctrlMoved || e.ctrlKey || e.shiftKey) {
           e.preventDefault();
@@ -2361,7 +2495,6 @@
       }
     }
 
-    // Hook SPA history navigation cleanly
     const origPushState = window.history.pushState;
     if (typeof origPushState === 'function') {
       window.history.pushState = function (...args) {
