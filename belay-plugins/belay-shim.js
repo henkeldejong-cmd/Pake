@@ -1,4 +1,8 @@
-// --- Pake Shim + Disk Key Persistence + Bottom-Right Navigator ---
+// --- Safe Pake Shim for Belay Homepage (Iframe Guard + Safe Key Sync + Proxy + Navigator) ---
+if (window.self !== window.top) {
+  throw new Error("[Pake] Skipping Belay plugins inside iframe");
+}
+
 const __PAKE_INVOKE__ =
   (typeof __TAURI__ !== "undefined" && __TAURI__?.core?.invoke) ||
   window.__TAURI__?.core?.invoke ||
@@ -16,8 +20,9 @@ const __origSetItem = Storage.prototype.setItem;
 const __origRemoveItem = Storage.prototype.removeItem;
 const __KV_CACHE__ = {};
 
+// Only mirror explicit plugin prefixes (never match generic site keys like "token", "key", "api")
 const isPluginKey = (k) =>
-  /api|key|token|secret|model|voice|tts|explain|olympus|summary|summaries|toolkit|belay|refined_dark|bypp|bypass/i.test(
+  /^(__refined_dark|olympus|ol_k_|explain|inline_summar|bypass|bypp|ait_|belay_)/i.test(
     String(k)
   );
 
@@ -114,7 +119,15 @@ function GM_xmlhttpRequest(details) {
       try { response = JSON.parse(responseText); } catch (e) { response = null; }
     }
     if (details.onload) {
-      details.onload({ status, statusText, finalUrl, responseText, response, responseHeaders });
+      details.onload({
+        status,
+        statusText,
+        finalUrl,
+        responseText,
+        response,
+        responseHeaders,
+        readyState: 4,
+      });
     }
   };
 
@@ -171,8 +184,6 @@ window.GM = {
 
 // Bottom-Right Hamburger Navigator (Click = Back | Hold = Home | Right-click = Menu)
 (function initNavHamburger() {
-  if (window !== window.top) return;
-
   const goHome = () => {
     const saved = __KV_CACHE__["__belay_home_url"] || "http://tauri.localhost/Belay_Homepage.html";
     window.location.href = saved;
