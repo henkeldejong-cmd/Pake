@@ -1,4 +1,4 @@
-// --- Pake / WebView Compatibility Shim ---
+// --- Pake Shim + Rust proxy_http + Disk Key Persistence for Reddit ---
 const __PAKE_INVOKE__ =
   (typeof __TAURI__ !== "undefined" && __TAURI__?.core?.invoke) ||
   window.__TAURI__?.core?.invoke ||
@@ -7,15 +7,65 @@ const __PAKE_INVOKE__ =
 
 window.unsafeWindow = window;
 
+const __origSetItem = Storage.prototype.setItem;
+const __origRemoveItem = Storage.prototype.removeItem;
+const __KV_CACHE__ = {};
+
+const isPluginKey = (k) =>
+  /api|key|token|secret|model|voice|tts|explain|olympus|summary|summaries|toolkit|reddit|rpp|rd_toolkit/i.test(
+    String(k)
+  );
+
+function syncToDisk(key, val) {
+  __KV_CACHE__[key] = val;
+  if (__PAKE_INVOKE__) {
+    __PAKE_INVOKE__("kv_set", { key, value: val === undefined ? null : val }).catch(() => {});
+  }
+}
+
+Storage.prototype.setItem = function (k, v) {
+  __origSetItem.call(this, k, v);
+  if (this === window.localStorage && isPluginKey(k)) {
+    syncToDisk("ls_" + k, String(v));
+  }
+};
+Storage.prototype.removeItem = function (k) {
+  __origRemoveItem.call(this, k);
+  if (this === window.localStorage && isPluginKey(k)) {
+    syncToDisk("ls_" + k, null);
+  }
+};
+
+if (__PAKE_INVOKE__) {
+  __PAKE_INVOKE__("kv_load")
+    .then((map) => {
+      if (!map || typeof map !== "object") return;
+      for (const [k, v] of Object.entries(map)) {
+        __KV_CACHE__[k] = v;
+        if (k.startsWith("ls_") && typeof v === "string") {
+          try {
+            __origSetItem.call(window.localStorage, k.slice(3), v);
+          } catch (e) {}
+        }
+      }
+    })
+    .catch(() => {});
+}
+
 function GM_setValue(key, val) {
   try {
-    localStorage.setItem("belay_toolkit_" + key, JSON.stringify(val));
+    __origSetItem.call(window.localStorage, "rd_toolkit_" + key, JSON.stringify(val));
   } catch (e) {}
+  syncToDisk("gm_" + key, val);
 }
 
 function GM_getValue(key, defaultVal) {
+  if (Object.prototype.hasOwnProperty.call(__KV_CACHE__, "gm_" + key)) {
+    const cached = __KV_CACHE__["gm_" + key];
+    return cached !== null && cached !== undefined ? cached : defaultVal;
+  }
   try {
-    const raw = localStorage.getItem("belay_toolkit_" + key);
+    const raw = window.localStorage.getItem("rd_toolkit_" + key);
     return raw !== null ? JSON.parse(raw) : defaultVal;
   } catch (e) {
     return defaultVal;
@@ -24,8 +74,10 @@ function GM_getValue(key, defaultVal) {
 
 function GM_deleteValue(key) {
   try {
-    localStorage.removeItem("belay_toolkit_" + key);
+    __origRemoveItem.call(window.localStorage, "rd_toolkit_" + key);
   } catch (e) {}
+  delete __KV_CACHE__["gm_" + key];
+  syncToDisk("gm_" + key, null);
 }
 
 function GM_addStyle(css) {
@@ -61,6 +113,7 @@ function GM_xmlhttpRequest(details) {
         responseText,
         response,
         responseHeaders,
+        readyState: 4,
       });
     }
   };
@@ -83,7 +136,6 @@ function GM_xmlhttpRequest(details) {
         handleSuccess(res.status, res.statusText, res.finalUrl, res.responseText, res.responseHeaders)
       )
       .catch((err) => {
-        console.error("[Pake proxy_http error]", details.url, err);
         if (!aborted && details.onerror) {
           details.onerror({ status: 0, statusText: String(err), error: String(err) });
         }
@@ -105,12 +157,7 @@ function GM_xmlhttpRequest(details) {
       });
   }
 
-  return {
-    abort: () => {
-      aborted = true;
-      controller.abort();
-    },
-  };
+  return { abort: () => { aborted = true; controller.abort(); } };
 }
 
 window.GM = {
