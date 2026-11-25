@@ -1,4 +1,8 @@
-// --- Safe Pake Shim (proxy_http + GM_* Disk Persistence, No Storage.prototype hook) ---
+// --- Safe Pake Shim (Iframe Guard + Ctrl+Hover Routing + proxy_http + GM_* Persistence) ---
+if (window.self !== window.top) {
+  throw new Error("[Pake] Skipping Reddit plugins inside iframe");
+}
+
 const __PAKE_INVOKE__ =
   (typeof __TAURI__ !== "undefined" && __TAURI__?.core?.invoke) ||
   window.__TAURI__?.core?.invoke ||
@@ -7,9 +11,40 @@ const __PAKE_INVOKE__ =
 
 window.unsafeWindow = window;
 
+// Coordinate Ctrl+hover between reddit-post-viewer.js and inline-summaries.js
+(function setupHoverRouting() {
+  const getInnerLink = (e) => {
+    const path = e.composedPath ? e.composedPath() : [e.target];
+    for (const el of path) {
+      if (el && el.tagName === "A" && el.href) return el;
+    }
+    return null;
+  };
+
+  ["mouseover", "pointerover"].forEach((evtName) => {
+    window.addEventListener(
+      evtName,
+      (e) => {
+        const link = getInnerLink(e);
+        if (!link) return;
+        const isReddit = /(^|\.)(reddit\.com|redd\.it)$/i.test(link.hostname);
+        if (isReddit) {
+          if (evtName === "mouseover" && window.__rppHandleHover) {
+            window.__rppHandleHover(e);
+          }
+          if (e.ctrlKey) {
+            e.stopImmediatePropagation();
+          }
+        }
+      },
+      true
+    );
+  });
+})();
+
 const __KV_CACHE__ = {};
 
-if (__PAKE_INVOKE__ && window === window.top) {
+if (__PAKE_INVOKE__) {
   __PAKE_INVOKE__("kv_load")
     .then((map) => {
       if (!map || typeof map !== "object") return;
