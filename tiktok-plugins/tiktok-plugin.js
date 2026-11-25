@@ -1,14 +1,14 @@
 // ==UserScript Combined for Pake==
 // @name         TikTok Pake Suite (De-Bloater + TikTok Pro + Adjustable Comments Expander)
-// @version      3.4.0
+// @version      3.5.0
 // @match        https://www.tiktok.com/*
 // @match        *://*.tiktok.com/*
 // ==/UserScript Combined for Pake==
 //
 // Merged Userscripts:
 //   1. TikTok Web De-Bloater & Performance Booster (v1.0)
-//   2. TikTok Pro — Typography, Anti-Bloat & UI (v3.4)
-//   3. TikTok Adjustable Comments Expander (v2.0) — controlled via Pro panel checkbox
+//   2. TikTok Pro — Typography, Anti-Bloat & UI (v3.5)
+//   3. TikTok Adjustable Comments Expander (v2.1) — controlled via Pro panel checkbox
 
 (() => {
   'use strict';
@@ -60,7 +60,6 @@
         }
         return parsed;
       }
-      // Legacy fallback for keys saved by earlier standalone scripts (e.g., tiktok-comment-width)
       if (key === 'tiktok-comment-width') {
         const legacy = window.localStorage.getItem(key);
         if (legacy !== null) return legacy;
@@ -577,7 +576,7 @@
   })();
 
   /* =========================================================================
-     5. SCRIPT 2: TIKTOK PRO — TYPOGRAPHY, ANTI-BLOAT & UI (v3.4)
+     5. SCRIPT 2: TIKTOK PRO — TYPOGRAPHY, ANTI-BLOAT & UI (v3.5)
      ========================================================================= */
   (function () {
     'use strict';
@@ -787,53 +786,164 @@
     updateSiteStyles();
 
     /* ============================================================
-       AUTO SCROLL
+       AUTO SCROLL (Supports looping <video loop>, native nav, ArrowDown & scroll-snap fallback)
        ============================================================ */
     let autoScrollObserver = null;
     const watchedVideos = new WeakSet();
+    const videoLastTime = new WeakMap();
     let autoScrollCooldown = false;
 
     function isSwipeFeed() {
       const p = window.location.pathname;
-      return p === '/' || p === '/foryou' || p === '/following' || p.includes('/video/');
+      return p === '/' || p === '/foryou' || p === '/following' || p.includes('/video/') || p.startsWith('/@');
+    }
+
+    function isUserTyping() {
+      const ae = document.activeElement;
+      if (!ae) return false;
+      const tag = ae.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || ae.isContentEditable;
+    }
+
+    function isVideoInViewport(video) {
+      if (!(video instanceof HTMLVideoElement)) return false;
+      const rect = video.getBoundingClientRect();
+      if (rect.width < 80 || rect.height < 80) return false;
+      const midY = rect.top + rect.height / 2;
+      return midY >= 0 && midY <= window.innerHeight;
+    }
+
+    function findScrollableContainer(startEl) {
+      let cur = startEl;
+      while (cur && cur !== document.documentElement) {
+        try {
+          const cs = window.getComputedStyle(cur);
+          if (
+            (cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
+            cur.scrollHeight > cur.clientHeight + 50
+          ) {
+            return cur;
+          }
+        } catch (_) {}
+        cur = cur.parentElement;
+      }
+      return (
+        document.querySelector('div[class*="-DivColumnListContainer"]') ||
+        document.scrollingElement ||
+        document.documentElement
+      );
+    }
+
+    function findNextVideoButton() {
+      const explicit = document.querySelector(
+        'button[data-e2e="arrow-right"], button[data-e2e*="arrow-down" i], button[aria-label*="next video" i]'
+      );
+      if (explicit && !explicit.disabled) return explicit;
+
+      // Look for TikTok's vertical 2-button chevron pair (up/down circular buttons)
+      const candidates = document.querySelectorAll('div[class*="DivSwiperControl"] button, div[class*="DivFeedNavigation"] button');
+      if (candidates.length >= 2) {
+        const downBtn = candidates[candidates.length - 1];
+        if (downBtn && !downBtn.disabled) return downBtn;
+      }
+
+      // Generic scan for circular chevron pair inside feed column
+      const feedCol = document.querySelector('div[class*="-DivColumnListContainer"]');
+      if (feedCol) {
+        const btns = Array.from(feedCol.querySelectorAll('button')).filter((b) => {
+          const r = b.getBoundingClientRect();
+          return r.width >= 32 && r.width <= 56 && Math.abs(r.width - r.height) <= 4 && b.querySelector('svg');
+        });
+        for (let i = 0; i < btns.length - 1; i++) {
+          const r1 = btns[i].getBoundingClientRect();
+          const r2 = btns[i + 1].getBoundingClientRect();
+          if (Math.abs(r1.left - r2.left) < 12 && r2.top > r1.top && r2.top - r1.bottom < 40) {
+            if (!btns[i + 1].disabled) return btns[i + 1];
+          }
+        }
+      }
+
+      return null;
     }
 
     function dispatchArrowDown() {
-      if (!document.body) return;
-      document.body.dispatchEvent(new KeyboardEvent('keydown', {
+      const evOpts = {
         key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40,
         bubbles: true, cancelable: true
-      }));
+      };
+      document.dispatchEvent(new KeyboardEvent('keydown', evOpts));
+      if (document.body) {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', evOpts));
+      }
+    }
+
+    function triggerAutoScroll(sourceVideo) {
+      if (!autoScroll || !isSwipeFeed() || autoScrollCooldown || isUserTyping()) return;
+
+      autoScrollCooldown = true;
+      setTimeout(() => { autoScrollCooldown = false; }, 1200);
+
+      const prevTop = sourceVideo ? sourceVideo.getBoundingClientRect().top : null;
+
+      // 1. Try clicking native next/down button if clearly identified
+      const nextBtn = findNextVideoButton();
+      if (nextBtn) {
+        nextBtn.click();
+      } else {
+        // 2. Try ArrowDown key event
+        dispatchArrowDown();
+      }
+
+      // 3. Fallback: if video is still centered in viewport after 180ms, scroll its snap container
+      setTimeout(() => {
+        if (!sourceVideo || !document.contains(sourceVideo)) return;
+        const nowRect = sourceVideo.getBoundingClientRect();
+        const stillSameSpot = prevTop !== null && Math.abs(nowRect.top - prevTop) < 40;
+        if (stillSameSpot && isVideoInViewport(sourceVideo)) {
+          const scroller = findScrollableContainer(sourceVideo);
+          if (scroller) {
+            const step = scroller.clientHeight || window.innerHeight || 600;
+            scroller.scrollBy({ top: step, behavior: 'smooth' });
+          }
+        }
+      }, 180);
     }
 
     function onVideoEnded(e) {
-      if (!autoScroll) return;
-      if (!isSwipeFeed()) return;
-      if (autoScrollCooldown) return;
-
       const video = e.target;
-      if (!video || video.duration <= 0) return;
-      if (video.currentTime < video.duration * 0.85 && video.currentTime > 0.5) return;
+      if (!(video instanceof HTMLVideoElement)) return;
+      if (!isVideoInViewport(video)) return;
+      triggerAutoScroll(video);
+    }
 
-      const commentsOpen = document.querySelector(
-        'aside[class*="CommentList"], [data-e2e="comment-list"], [class*="-DivCommentListContainer"]'
-      );
-      if (commentsOpen) return;
+    function onVideoTimeUpdate(e) {
+      if (!autoScroll || !isSwipeFeed()) return;
+      const video = e.target;
+      if (!(video instanceof HTMLVideoElement)) return;
+      if (!video.duration || video.duration < 1 || video.paused || video.seeking) return;
 
-      autoScrollCooldown = true;
-      setTimeout(() => { autoScrollCooldown = false; }, 800);
-      dispatchArrowDown();
+      const prev = videoLastTime.get(video) || 0;
+      const cur = video.currentTime;
+      videoLastTime.set(video, cur);
+
+      const endThreshold = video.duration > 2 ? video.duration - 0.85 : video.duration * 0.7;
+      if (prev >= endThreshold && cur < 0.75 && cur < prev - 0.4) {
+        if (!isVideoInViewport(video)) return;
+        triggerAutoScroll(video);
+      }
     }
 
     function attachEndedListener(video) {
-      if (watchedVideos.has(video)) return;
+      if (!(video instanceof HTMLVideoElement) || watchedVideos.has(video)) return;
       watchedVideos.add(video);
       video.addEventListener('ended', onVideoEnded);
+      video.addEventListener('timeupdate', onVideoTimeUpdate);
     }
 
     function startAutoScrollWatcher() {
-      if (autoScrollObserver || !document.body) return;
+      if (!document.body) return;
       document.querySelectorAll('video').forEach(attachEndedListener);
+      if (autoScrollObserver) return;
 
       autoScrollObserver = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
@@ -902,7 +1012,6 @@
       } catch (_) {}
     }
 
-    // Patch early so hidden/visibilityState seamlessly follows bgPlay
     patchVisibilityAPI();
 
     let bgPlayPauseObserver = null;
@@ -1267,11 +1376,13 @@
       clearTimeout(wheelTimer);
       wheelTimer = setTimeout(() => { wheelAcc = 0; }, 150);
 
-      if (wheelAcc > 80 && document.body) {
-        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40, bubbles: true, cancelable: true }));
+      if (wheelAcc > 80) {
+        dispatchArrowDown();
         wheelAcc = 0;
-      } else if (wheelAcc < -80 && document.body) {
-        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38, which: 38, bubbles: true, cancelable: true }));
+      } else if (wheelAcc < -80) {
+        const upOpts = { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38, which: 38, bubbles: true, cancelable: true };
+        document.dispatchEvent(new KeyboardEvent('keydown', upOpts));
+        if (document.body) document.body.dispatchEvent(new KeyboardEvent('keydown', upOpts));
         wheelAcc = 0;
       }
     }, { passive: false });
@@ -1294,7 +1405,7 @@
   })();
 
   /* =========================================================================
-     6. SCRIPT 3: TIKTOK ADJUSTABLE COMMENTS EXPANDER (v2.0)
+     6. SCRIPT 3: TIKTOK ADJUSTABLE COMMENTS EXPANDER (v2.1)
      Controlled via Pro Panel checkbox ("ttp_commentExpander")
      ========================================================================= */
   (function () {
@@ -1305,11 +1416,55 @@
     const STYLE_ID    = 'ttp-comment-expander-styles';
 
     const EXPANDER_CSS = `
-      /* Let the video container fill the available space naturally */
+      /* Let the video feed column flex smoothly beside the comments sidebar without double-subtracting nav width */
       div[class*="-DivColumnListContainer"] {
-        flex-grow: 1 !important;
+        flex: 1 1 0% !important;
+        min-width: 0 !important;
         width: auto !important;
-        max-width: calc(100% - var(--custom-comment-width)) !important;
+        max-width: none !important;
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+      }
+
+      /* Collapse excess horizontal gutters around the video card so comments expand into the empty gap */
+      div[class*="-DivColumnListContainer"] article[data-e2e="recommend-list-item-container"],
+      div[class*="-DivColumnListContainer"] div[class*="-DivItemContainer"],
+      div[class*="-DivColumnListContainer"] div[class*="-DivContentWrapper"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        justify-content: center !important;
+        gap: 10px !important;
+      }
+
+      /* Keep the video card full-height and aspect-ratio driven instead of squishing horizontally */
+      div[class*="-DivColumnListContainer"] div[class*="-DivMediaCard"],
+      div[class*="-DivColumnListContainer"] div[class*="-DivVideoContainer"],
+      div[class*="-DivColumnListContainer"] div[class*="-DivPlayerContainer"],
+      div[class*="-DivColumnListContainer"] div[class*="-DivFeedVideoWrapper"] {
+        height: 100% !important;
+        max-height: calc(100vh - 24px) !important;
+        width: auto !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+      }
+
+      div[class*="-DivColumnListContainer"] video {
+        max-height: 100% !important;
+        max-width: 100% !important;
+        object-fit: contain !important;
+      }
+
+      /* Keep the vertical action bar compact next to the video */
+      div[class*="-DivColumnListContainer"] div[class*="-DivActionItemContainer"],
+      div[class*="-DivColumnListContainer"] div[class*="-DivSideActionBar"] {
+        flex-shrink: 0 !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
       }
 
       /* Set the comments sidebar to our custom variable width */
@@ -1367,9 +1522,17 @@
     let startX = 0;
     let startWidth = 0;
 
+    function clampWidthPx(px) {
+      const minWidth = 340;
+      const maxWidth = Math.max(minWidth, Math.min(window.innerWidth * 0.7, window.innerWidth - 380));
+      return Math.max(minWidth, Math.min(px, maxWidth));
+    }
+
     function applySavedWidth() {
-      const savedWidth = String(GM_getValue(WIDTH_KEY, '450px') || '450px');
-      document.documentElement.style.setProperty('--custom-comment-width', savedWidth);
+      const raw = String(GM_getValue(WIDTH_KEY, '450px') || '450px');
+      const num = parseInt(raw, 10);
+      const clamped = Number.isFinite(num) ? `${Math.round(clampWidthPx(num))}px` : '450px';
+      document.documentElement.style.setProperty('--custom-comment-width', clamped);
     }
 
     function updateStyleState() {
@@ -1436,14 +1599,7 @@
       if (!isResizing || !enabled || !activeSidebar) return;
 
       const deltaX = startX - e.clientX;
-      let newWidth = startWidth + deltaX;
-
-      const minWidth = 350;
-      const maxWidth = window.innerWidth * 0.7;
-
-      if (newWidth < minWidth) newWidth = minWidth;
-      if (newWidth > maxWidth) newWidth = maxWidth;
-
+      const newWidth = clampWidthPx(startWidth + deltaX);
       document.documentElement.style.setProperty('--custom-comment-width', `${Math.round(newWidth)}px`);
     });
 
@@ -1463,6 +1619,10 @@
       if (finalWidth) {
         GM_setValue(WIDTH_KEY, finalWidth);
       }
+    });
+
+    window.addEventListener('resize', () => {
+      if (enabled) applySavedWidth();
     });
 
     function scheduleAttach() {
