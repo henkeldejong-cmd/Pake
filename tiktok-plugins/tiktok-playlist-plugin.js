@@ -1,8 +1,8 @@
 // ==UserScript Adapted for Pake==
-// @name         Final Tiktok Playlist (TSV Avatar Import Edition) — Pake Low-CPU Edition
+// @name         Final Tiktok Playlist (TSV Avatar Import Edition) — Pake Edition
 // @namespace    belay m.
-// @version      3.0.0-pake
-// @description  TikTok playlist with batch-throttled avatar sync (5/batch, 2 concurrent), viewport-lazy image pool (max 5 concurrent), chunked DOM rendering, IndexedDB-only Base64 storage, 72x72 thumbnail downscaling, draggable controls, and TSV import support.
+// @version      3.1.0-pake
+// @description  TikTok playlist with full multi-tier avatar resolution, 5-per-batch low-CPU sync, per-request timeouts, viewport-lazy image pool, chunked DOM rendering, IndexedDB-only Base64 storage, draggable controls, and TSV import support.
 // @match        https://www.tiktok.com/*
 // @match        *://*.tiktok.com/*
 // ==/UserScript Adapted for Pake==
@@ -287,12 +287,19 @@
     let timeoutId = null;
     const abortCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
 
+    const cleanup = () => {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      __ACTIVE_XHR_SET__.delete(handle);
+    };
+
     const handle = {
       abort() {
         if (aborted) return;
         aborted = true;
         cleanup();
-        __ACTIVE_XHR_SET__.delete(handle);
         if (abortCtrl) {
           try { abortCtrl.abort(); } catch (_) {}
         }
@@ -300,14 +307,6 @@
           try { details.onabort({ readyState: 4, status: 0, context: details.context }); } catch (_) {}
         }
       }
-    };
-
-    const cleanup = () => {
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-      __ACTIVE_XHR_SET__.delete(handle);
     };
 
     __ACTIVE_XHR_SET__.add(handle);
@@ -497,7 +496,7 @@
   };
 
   /* =========================================================================
-     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v3.0.0 — LOW-CPU BATCH ENGINE
+     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v3.1.0 — LOW-CPU & FULL TIERS
      ========================================================================= */
   (function () {
     'use strict';
@@ -523,15 +522,16 @@
     const DB_VERSION           = 2;
     const DB_STORE             = 'avatars_store_v2';
 
-    // Strict throttling & batch limits for low-end CPUs / Windows network stack
-    const SYNC_BATCH_SIZE      = 5;     // Process 5 avatars per batch
-    const SYNC_CONCURRENCY     = 2;     // Max 2 concurrent API requests per batch
-    const SYNC_BATCH_PAUSE_MS  = 1400;  // Cool-down pause between batches
+    // Throttling & batch limits for low-end CPUs / Windows network stack
+    const SYNC_BATCH_SIZE      = 5;     // 5 avatars per batch
+    const SYNC_CONCURRENCY     = 2;     // Max 2 concurrent fetches per batch
+    const SYNC_BATCH_PAUSE_MS  = 1200;  // Cool-down pause between batches
     const SYNC_ITEM_STAGGER_MS = 350;   // Stagger inside each batch
     const MAX_CONCURRENT_IMGS  = 5;     // Max 5 visible <img> network loads at once
     const REQ_TIMEOUT_MS       = 8000;  // Strict API/HTML timeout
     const IMG_TIMEOUT_MS       = 6000;  // Strict Image load timeout
-    const MAX_CONSEC_FAILURES  = 6;     // Circuit breaker threshold
+    const USER_WATCHDOG_MS     = 20000; // Hard cap per user so loop can never hang
+    const MAX_NET_FAILURES     = 10;    // Trip circuit breaker only on true network/429 failures
     const CHUNK_SIZE           = 100;   // Incremental DOM render chunk size
     const THUMB_MAX_PX         = 72;    // Downscale Base64 thumbnails to 72x72 (~1.5KB)
 
@@ -899,43 +899,32 @@
     }
 
     /***************************************************************************
-     * Dual Storage v2: IndexedDB Primary (NO Base64 JSON.stringify in localStorage!)
+     * Dual Storage v2: IndexedDB Primary (Preserves all cached avatars, zero LS thrashing)
      ***************************************************************************/
     let avatarCache = {};
     let idbInstance = null;
 
-    // Clean out huge legacy localStorage blob if present; migrate Base64 into IndexedDB on open
-    let pendingV1Base64Migration = null;
+    // Migrate any leftover localStorage entries into IndexedDB without wiping IndexedDB
+    let pendingLSMigration = null;
     try {
-      const rawV1 = window.localStorage.getItem(STORAGE_AVATARS_V1);
-      if (rawV1) {
-        const parsedV1 = parseMaybeJson(rawV1, null);
-        if (parsedV1 && typeof parsedV1 === 'object') {
-          pendingV1Base64Migration = {};
-          for (const [k, v] of Object.entries(parsedV1)) {
-            if (typeof v === 'string' && v.startsWith('data:image')) {
-              avatarCache[k] = v;
-              pendingV1Base64Migration[k] = v;
+      for (const lsKey of [STORAGE_AVATARS_V1, STORAGE_AVATARS]) {
+        const raw = window.localStorage.getItem(lsKey);
+        if (raw) {
+          const parsed = parseMaybeJson(raw, null);
+          if (parsed && typeof parsed === 'object') {
+            pendingLSMigration = pendingLSMigration || {};
+            for (const [k, v] of Object.entries(parsed)) {
+              const ok = lsKey === STORAGE_AVATARS_V1
+                ? (typeof v === 'string' && v.startsWith('data:image'))
+                : isValidAvatarVal(v);
+              if (ok) {
+                avatarCache[k] = v;
+                pendingLSMigration[k] = v;
+              }
             }
           }
+          window.localStorage.removeItem(lsKey);
         }
-        window.localStorage.removeItem(STORAGE_AVATARS_V1);
-      }
-      // Also clean up oversized v2 localStorage if earlier version put Base64 inside it
-      const rawV2 = window.localStorage.getItem(STORAGE_AVATARS);
-      if (rawV2) {
-        const parsedV2 = parseMaybeJson(rawV2, null);
-        if (parsedV2 && typeof parsedV2 === 'object') {
-          pendingV1Base64Migration = pendingV1Base64Migration || {};
-          for (const [k, v] of Object.entries(parsedV2)) {
-            if (isValidAvatarVal(v)) {
-              avatarCache[k] = v;
-              pendingV1Base64Migration[k] = v;
-            }
-          }
-        }
-        // Keep localStorage tiny (remove Base64 blobs from localStorage)
-        window.localStorage.removeItem(STORAGE_AVATARS);
       }
     } catch (_) {}
 
@@ -993,17 +982,16 @@
       });
     }
 
-    // Load cached avatars from IndexedDB asynchronously without blocking startup
     getIDB().then((db) => {
       if (!db) return;
       try {
-        if (pendingV1Base64Migration) {
+        if (pendingLSMigration) {
           const migTx = db.transaction(DB_STORE, 'readwrite');
           const migStore = migTx.objectStore(DB_STORE);
-          for (const [k, v] of Object.entries(pendingV1Base64Migration)) {
+          for (const [k, v] of Object.entries(pendingLSMigration)) {
             if (isValidAvatarVal(v)) migStore.put(v, k);
           }
-          pendingV1Base64Migration = null;
+          pendingLSMigration = null;
         }
 
         const tx = db.transaction(DB_STORE, 'readwrite');
@@ -1024,9 +1012,7 @@
             }
             cursor.continue();
           } else {
-            if (updatedVisible) {
-              syncRenderedRowAvatars();
-            }
+            if (updatedVisible) syncRenderedRowAvatars();
             updateSyncButtonLabel();
           }
         };
@@ -1169,7 +1155,12 @@
         }
 
         if (task.url.startsWith('data:image')) {
-          // Local Base64: zero network traffic
+          task.img.onload = () => {
+            if (task.img.naturalWidth > 0) {
+              task.img.style.display = 'block';
+              task.placeholder.style.display = 'none';
+            }
+          };
           task.img.src = task.url;
           continue;
         }
@@ -1276,7 +1267,7 @@
             cacheAvatar(cur, srcUrl);
             broadcastAvatarUpdate(cur, srcUrl);
             convertUrlToBase64(srcUrl).then((base64) => {
-              if (base64 && base64.startsWith('data:image')) {
+              if (!isShuttingDown && base64 && base64.startsWith('data:image')) {
                 cacheAvatar(cur, base64);
                 broadcastAvatarUpdate(cur, base64);
               }
@@ -1285,7 +1276,6 @@
         }
       }
 
-      // Scan page links outside our own sidebar only (bounded to first 40 links)
       const mainRoot = document.querySelector('main, [id="app"], [class*="DivBodyContainer"]') || document.body;
       const links = mainRoot.querySelectorAll('a[href*="/@"]');
       const limit = Math.min(links.length, 40);
@@ -1310,10 +1300,11 @@
     }
 
     /***************************************************************************
-     * Multi-Tier Pake Avatar Resolution Engine (Strict Timeouts + Fast Parsing)
-     *   Tier 1: TikWM User Info API via Rust proxy_http (1KB JSON, no X-Bogus)
-     *   Tier 2: TikTok Creator Embed HTML (/embed/@u) via browser fetch / proxy
-     *   Tier 3: Unavatar JSON API via proxy_http (last-resort fallback)
+     * Multi-Tier Pake Avatar Resolution Engine (Full Tiers + Strict Timeouts)
+     *   Tier 1: TikWM User Info API via Rust proxy_http
+     *   Tier 2: TikTok Profile (/@u) & Embed (/embed/@u) HTML via fetchWithTimeout
+     *   Tier 3: TikTok Profile & Embed HTML via proxy_http with Desktop headers
+     *   Tier 4: Unavatar JSON API via proxy_http
      ***************************************************************************/
     function proxyGetText(url, headers = {}) {
       return new Promise((resolve) => {
@@ -1425,7 +1416,7 @@
       }
 
       if (candidates.length === 0) {
-        for (const key of ['"avatarThumb":"', '"avatarMedium":"', '"avatarLarger":"']) {
+        for (const key of ['"avatarThumb":"', '"avatarThumb": "', '"avatarMedium":"', '"avatarMedium": "', '"avatarLarger":"']) {
           const kIdx = html.indexOf(key);
           if (kIdx !== -1) {
             const valStart = kIdx + key.length;
@@ -1464,22 +1455,26 @@
       }
     }
 
-    async function fetchAvatarForUsername(username) {
+    async function fetchAvatarForUsernameCore(username) {
       const u = cleanUsername(username);
       if (!u || isShuttingDown) return null;
 
       let sawRateLimit = false;
+      let sawNetworkFail = false;
+      let gotAnyValidHttp = false;
+
       const ua =
         navigator.userAgent ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0';
 
-      // Tier 1: TikWM Public User Info API via proxy_http (tiny JSON, low CPU)
+      // Tier 1: TikWM Public User Info API via proxy_http
       if (__PAKE_INVOKE__ && Date.now() >= tikwmCooldownUntil) {
         const tikwm = await proxyGetJson(
           `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent('@' + u)}`,
           { 'User-Agent': ua, Referer: 'https://www.tikwm.com/' }
         );
         const payload = tikwm?.data;
+        if (tikwm?.status === 200) gotAnyValidHttp = true;
         if (payload && payload.code === 0 && payload.data && payload.data.user) {
           const usr = payload.data.user;
           const rawList = [usr.avatarThumb, usr.avatarMedium, usr.avatarLarger, usr.avatar]
@@ -1495,55 +1490,89 @@
         ) {
           sawRateLimit = true;
           tikwmCooldownUntil = Date.now() + 30000;
+        } else if (tikwm?.status === 0) {
+          sawNetworkFail = true;
         }
       }
 
       if (isShuttingDown) return null;
 
-      // Tier 2: Lightweight TikTok Creator Embed HTML (/embed/@u) via browser fetch, then proxy_http
-      const embedUrl = `https://www.tiktok.com/embed/@${encodeURIComponent(u)}`;
-      const embedRes = await fetchWithTimeout(embedUrl, { credentials: 'include' });
-      if (embedRes) {
-        if (embedRes.status === 429) {
+      // Tier 2: TikTok Profile (/@u) & Embed (/embed/@u) via browser fetch() with strict 8s timeout
+      const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(u)}`;
+      const embedUrl   = `https://www.tiktok.com/embed/@${encodeURIComponent(u)}`;
+
+      for (const targetUrl of [profileUrl, embedUrl]) {
+        if (isShuttingDown) return null;
+        const pageRes = await fetchWithTimeout(targetUrl, { credentials: 'include' });
+        if (!pageRes) {
+          sawNetworkFail = true;
+          continue;
+        }
+        if (pageRes.status === 429) {
           sawRateLimit = true;
-        } else if (embedRes.ok) {
+          continue;
+        }
+        if (pageRes.ok || pageRes.status === 404) gotAnyValidHttp = true;
+        if (pageRes.ok) {
           try {
-            const html = await embedRes.text();
+            const html = await pageRes.text();
             const okUrl = await pickFirstLoadable(extractAvatarCandidatesFromHtml(html, u));
-            if (okUrl) return { url: okUrl, source: 'tiktok-embed-fetch' };
+            if (okUrl) return { url: okUrl, source: 'tiktok-fetch' };
           } catch (_) {}
         }
       }
 
       if (isShuttingDown) return null;
 
+      // Tier 3: TikTok Profile & Embed via proxy_http with Desktop headers
       if (__PAKE_INVOKE__) {
-        const proxiedEmbed = await proxyGetText(embedUrl, {
+        const browserHeaders = {
           'User-Agent': ua,
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9'
-        });
-        if (proxiedEmbed.status === 429) {
-          sawRateLimit = true;
-        } else if (proxiedEmbed.text) {
-          const okUrl = await pickFirstLoadable(extractAvatarCandidatesFromHtml(proxiedEmbed.text, u));
-          if (okUrl) return { url: okUrl, source: 'tiktok-embed-proxy' };
+        };
+        for (const targetUrl of [embedUrl, profileUrl]) {
+          if (isShuttingDown) return null;
+          const proxied = await proxyGetText(targetUrl, browserHeaders);
+          if (proxied.status === 429) {
+            sawRateLimit = true;
+            continue;
+          }
+          if (proxied.status === 0) {
+            sawNetworkFail = true;
+            continue;
+          }
+          if (proxied.status >= 200 && proxied.status < 500) gotAnyValidHttp = true;
+          if (proxied.text) {
+            const okUrl = await pickFirstLoadable(extractAvatarCandidatesFromHtml(proxied.text, u));
+            if (okUrl) return { url: okUrl, source: 'tiktok-proxy' };
+          }
         }
 
         if (isShuttingDown) return null;
 
-        // Tier 3: Unavatar JSON API via proxy_http (last-resort fallback; avoids img-src CSP)
+        // Tier 4: Unavatar JSON API via proxy_http
         const unavatar = await proxyGetJson(
           `https://unavatar.io/tiktok/${encodeURIComponent(u)}?json&fallback=false`,
           { 'User-Agent': ua }
         );
+        if (unavatar?.status === 200) gotAnyValidHttp = true;
         const uUrl = decodeEscapedUrl(unavatar?.data?.url || '');
         if (isGoodAvatarUrl(uUrl) && (await verifyImageLoads(uUrl))) {
           return { url: uUrl, source: 'unavatar' };
         }
       }
 
-      return sawRateLimit ? { rateLimited: true } : { notFound: true };
+      if (sawRateLimit) return { rateLimited: true };
+      if (!gotAnyValidHttp && sawNetworkFail) return { netError: true };
+      return { notFound: true };
+    }
+
+    function fetchAvatarForUsername(username) {
+      return Promise.race([
+        fetchAvatarForUsernameCore(username),
+        sleep(USER_WATCHDOG_MS).then(() => ({ netError: true }))
+      ]);
     }
 
     function broadcastAvatarUpdate(username, url) {
@@ -1575,7 +1604,7 @@
     }
 
     /***************************************************************************
-     * Throttled Batch Sync Engine (5 per batch, max 2 concurrent, circuit breaker)
+     * Throttled Batch Sync Engine (5 per batch, max 2 concurrent, smart breaker)
      ***************************************************************************/
     const lazyFetchQueue = [];
     const lazyFetchQueuedSet = new Set();
@@ -1585,6 +1614,7 @@
       const res = await fetchAvatarForUsername(u);
       if (isShuttingDown) return 'ABORT';
       if (res?.rateLimited) return 'RATE_LIMITED';
+      if (res?.netError) return 'NET_ERROR';
 
       if (res?.url && isGoodAvatarUrl(res.url)) {
         cacheAvatar(u, res.url);
@@ -1601,14 +1631,14 @@
       }
 
       sessionFailedSet.add(u);
-      return 'MISS';
+      return 'NOT_FOUND';
     }
 
     async function runLazyQueue() {
       if (lazyWorkerRunning || isShuttingDown) return;
       lazyWorkerRunning = true;
 
-      let consecFailures = 0;
+      let consecNetErrors = 0;
       while (lazyFetchQueue.length > 0 && !isShuttingDown) {
         if (isSyncing) {
           lazyFetchQueue.length = 0;
@@ -1621,19 +1651,19 @@
 
         const status = await resolveAndStoreAvatar(u);
         if (status === 'ABORT') break;
-        if (status === 'RATE_LIMITED') {
-          consecFailures++;
-          if (consecFailures >= MAX_CONSEC_FAILURES) break;
-          lazyFetchQueue.unshift(u);
-          lazyFetchQueuedSet.add(u);
-          await sleep(3500);
-        } else if (status === 'OK') {
-          consecFailures = 0;
-          await sleep(1000);
+        if (status === 'RATE_LIMITED' || status === 'NET_ERROR') {
+          consecNetErrors++;
+          if (consecNetErrors >= MAX_NET_FAILURES) break;
+          if (status === 'RATE_LIMITED') {
+            lazyFetchQueue.unshift(u);
+            lazyFetchQueuedSet.add(u);
+            await sleep(3500);
+          } else {
+            await sleep(1200);
+          }
         } else {
-          consecFailures++;
-          if (consecFailures >= MAX_CONSEC_FAILURES) break;
-          await sleep(800);
+          consecNetErrors = 0;
+          await sleep(900);
         }
       }
 
@@ -1644,7 +1674,7 @@
       const u = cleanUsername(username);
       if (!u || isSyncing || isShuttingDown) return;
       if (isValidAvatarVal(avatarCache[u]) || sessionFailedSet.has(u) || lazyFetchQueuedSet.has(u)) return;
-      if (lazyFetchQueue.length >= 25) return; // Cap lazy queue to visible viewport items
+      if (lazyFetchQueue.length >= 25) return;
       lazyFetchQueuedSet.add(u);
       lazyFetchQueue.push(u);
       runLazyQueue();
@@ -1686,9 +1716,8 @@
 
       let completedCount = usernames.length - missing.length;
       const totalCount = usernames.length;
-      let consecFailures = 0;
+      let consecNetErrors = 0;
 
-      // Process strictly in batches of SYNC_BATCH_SIZE (5) with SYNC_CONCURRENCY (2)
       for (let i = 0; i < missing.length && !syncAborted && !isShuttingDown; i += SYNC_BATCH_SIZE) {
         const batch = missing.slice(i, i + SYNC_BATCH_SIZE);
         let batchIdx = 0;
@@ -1705,11 +1734,14 @@
 
             const status = await resolveAndStoreAvatar(u);
             if (status === 'OK') {
-              consecFailures = 0;
+              consecNetErrors = 0;
               completedCount++;
-            } else if (status === 'RATE_LIMITED' || status === 'MISS') {
-              consecFailures++;
-              if (consecFailures >= MAX_CONSEC_FAILURES) {
+            } else if (status === 'NOT_FOUND') {
+              // Account missing/private — skip cleanly without tripping network circuit breaker
+              consecNetErrors = 0;
+            } else if (status === 'RATE_LIMITED' || status === 'NET_ERROR') {
+              consecNetErrors++;
+              if (consecNetErrors >= MAX_NET_FAILURES) {
                 syncCircuitBroken = true;
                 syncAborted = true;
                 break;
@@ -2417,7 +2449,6 @@
         return;
       }
 
-      // Group items by category in memory first
       const grouped = new Map();
       for (let i = 0; i < displayItems.length; i++) {
         const it = displayItems[i];
@@ -2463,7 +2494,6 @@
           mainCategory: item.mainCategory || 'General'
         }));
 
-        // Store TSV avatar URLs directly in IndexedDB (lazy-loaded on viewport scroll, never burst-fetched)
         getIDB().then((db) => {
           const validEntries = parsedData.filter(
             (item) => item.avatarUrl && isGoodAvatarUrl(item.avatarUrl) && !isValidAvatarVal(avatarCache[item.username])
@@ -2750,7 +2780,6 @@
         try { rowObserver.disconnect(); } catch (_) {}
       }
 
-      // Abort every in-flight proxy_http / fetch request and image load immediately
       __ACTIVE_XHR_SET__.forEach((xhr) => {
         try { xhr.abort(); } catch (_) {}
       });
