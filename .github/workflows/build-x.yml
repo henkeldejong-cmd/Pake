@@ -34,7 +34,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Custom X MSI
-        run: node dist/cli.js https://x.com --name "X" --identifier com.pake.x.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url --inject ./x-plugins/x-shim.js --inject ./x-plugins/all-in-one-toolkit.js --inject ./x-plugins/explain-x.js --inject ./x-plugins/inline-summaries.js --inject ./x-plugins/post-tools.js
+        run: node dist/cli.js https://x.com --name "X" --identifier com.pake.x.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url
 
       - name: Upload X MSI
         uses: actions/upload-artifact@v4
