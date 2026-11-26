@@ -1,0 +1,44 @@
+name: Build My Custom X App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "x-plugins/**"
+      - ".github/workflows/build-x.yml"
+  workflow_dispatch:
+
+jobs:
+  build-x-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Check combined JS syntax
+        shell: bash
+        run: |
+          cat x-plugins/x-shim.js x-plugins/all-in-one-toolkit.js x-plugins/explain-x.js x-plugins/inline-summaries.js x-plugins/post-tools.js > combined-check.js
+          node --check combined-check.js
+          rm combined-check.js
+
+      - name: Setup Pake environment
+        uses: ./.github/actions/setup-env
+        with:
+          mode: build
+
+      - name: Build Pake CLI
+        run: pnpm run cli:build
+
+      - name: Build Custom X MSI
+        run: node dist/cli.js https://x.com --name "X" --identifier com.pake.x.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url --inject ./x-plugins/x-shim.js --inject ./x-plugins/all-in-one-toolkit.js --inject ./x-plugins/explain-x.js --inject ./x-plugins/inline-summaries.js --inject ./x-plugins/post-tools.js
+
+      - name: Upload X MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-x-msi
+          path: "*.msi"
+          if-no-files-found: error
