@@ -31,7 +31,7 @@ jobs:
         run: pnpm run cli:build
 
       - name: Build Custom Sofascore MSI
-        run: node dist/cli.js https://www.sofascore.com --name "Sofascore" --identifier com.pake.sofascore.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.0.0" --inject ./sofascore-plugins/sofascore-adblock.js
+        run: node dist/cli.js https://www.sofascore.com --name "Sofascore" --identifier com.pake.sofascore.clean --width 1280 --height 760 --maximize --new-window --no-restore-last-url
 
       - name: Upload Sofascore MSI
         uses: actions/upload-artifact@v4
