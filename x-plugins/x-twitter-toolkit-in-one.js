@@ -3100,7 +3100,7 @@
 
         const placeholder = el('span', {
           className: 'x-pp-avatar-placeholder',
-          textContent: (item.handle.replace(/^[@https?://]+/, '')[0] || '𝕏').toUpperCase()
+          textContent: (item.handle.replace(/^https?:\x2f\x2f(?:www\.)?(?:x|twitter)\.com\x2f|^@+/i, '')[0] || '𝕏').toUpperCase()
         });
         const img = el('img', { className: 'x-pp-avatar-img' });
         img.referrerPolicy = 'no-referrer';
@@ -3370,25 +3370,34 @@
   function applyWidgetPos(wrap) {
     if (!wrap) return;
     const savedPos = Store.get('x_ctrl_btnpos', null);
-    if (savedPos && savedPos.top && (savedPos.left || savedPos.right)) {
-      const maxT = Math.max(8, window.innerHeight - (wrap.offsetHeight || 76) - 8);
-      const t = Math.max(8, Math.min(parseFloat(savedPos.top) || 20, maxT));
-      wrap.style.top = `${t}px`;
-      wrap.style.bottom = 'auto';
-      if (savedPos.left) {
-        const maxL = Math.max(8, window.innerWidth - (wrap.offsetWidth || 34) - 8);
-        wrap.style.left = `${Math.max(8, Math.min(parseFloat(savedPos.left) || 18, maxL))}px`;
-        wrap.style.right = 'auto';
+    const vw = window.innerWidth || document.documentElement?.clientWidth || 1280;
+    const vh = window.innerHeight || document.documentElement?.clientHeight || 800;
+
+    if (savedPos && typeof savedPos === 'object' && savedPos.top && (savedPos.left || savedPos.right)) {
+      const topNum = parseFloat(savedPos.top);
+      const maxT = Math.max(8, vh - (wrap.offsetHeight || 76) - 8);
+      const t = Number.isFinite(topNum) ? Math.max(8, Math.min(topNum, maxT)) : 20;
+      wrap.style.setProperty('top', `${t}px`, 'important');
+      wrap.style.setProperty('bottom', 'auto', 'important');
+
+      if (savedPos.left && savedPos.left !== 'auto') {
+        const leftNum = parseFloat(savedPos.left);
+        const maxL = Math.max(8, vw - (wrap.offsetWidth || 34) - 8);
+        const l = Number.isFinite(leftNum) ? Math.max(8, Math.min(leftNum, maxL)) : (vw - 52);
+        wrap.style.setProperty('left', `${l}px`, 'important');
+        wrap.style.setProperty('right', 'auto', 'important');
       } else {
-        const maxR = Math.max(8, window.innerWidth - (wrap.offsetWidth || 34) - 8);
-        wrap.style.right = `${Math.max(8, Math.min(parseFloat(savedPos.right) || 18, maxR))}px`;
-        wrap.style.left = 'auto';
+        const rightNum = parseFloat(savedPos.right);
+        const maxR = Math.max(8, vw - (wrap.offsetWidth || 34) - 8);
+        const r = Number.isFinite(rightNum) ? Math.max(8, Math.min(rightNum, maxR)) : 18;
+        wrap.style.setProperty('right', `${r}px`, 'important');
+        wrap.style.setProperty('left', 'auto', 'important');
       }
     } else {
-      wrap.style.top = 'auto';
-      wrap.style.left = 'auto';
-      wrap.style.bottom = '20px';
-      wrap.style.right = '18px';
+      wrap.style.setProperty('top', 'auto', 'important');
+      wrap.style.setProperty('left', 'auto', 'important');
+      wrap.style.setProperty('bottom', '20px', 'important');
+      wrap.style.setProperty('right', '18px', 'important');
     }
   }
 
@@ -3396,14 +3405,17 @@
     const rootTarget = document.body || document.documentElement;
     if (!rootTarget || document.getElementById('x-controls-wrap')) return;
 
-    const wrap = el('div', {
-      id: 'x-controls-wrap',
-      style: {
-        position: 'fixed', bottom: '20px', right: '18px', zIndex: '2147483647',
-        display: 'flex', flexDirection: 'column', gap: '2px', width: '34px',
-        userSelect: 'none'
-      }
-    });
+    const wrap = el('div', { id: 'x-controls-wrap' });
+    wrap.style.setProperty('position', 'fixed', 'important');
+    wrap.style.setProperty('display', 'flex', 'important');
+    wrap.style.setProperty('flex-direction', 'column', 'important');
+    wrap.style.setProperty('gap', '2px', 'important');
+    wrap.style.setProperty('width', '34px', 'important');
+    wrap.style.setProperty('z-index', '2147483647', 'important');
+    wrap.style.setProperty('visibility', 'visible', 'important');
+    wrap.style.setProperty('opacity', '1', 'important');
+    wrap.style.setProperty('pointer-events', 'auto', 'important');
+    wrap.style.setProperty('user-select', 'none', 'important');
 
     // Dedicated Desktop Drag Grip (plus Ctrl/Shift+Drag on any button)
     const grip = el('div', {
@@ -3481,10 +3493,10 @@
       origL = rect.left;
       origT = rect.top;
       grip.style.cursor = 'grabbing';
-      wrap.style.bottom = 'auto';
-      wrap.style.right = 'auto';
-      wrap.style.left = `${origL}px`;
-      wrap.style.top = `${origT}px`;
+      wrap.style.setProperty('bottom', 'auto', 'important');
+      wrap.style.setProperty('right', 'auto', 'important');
+      wrap.style.setProperty('left', `${origL}px`, 'important');
+      wrap.style.setProperty('top', `${origT}px`, 'important');
       e.preventDefault();
     });
 
@@ -3495,8 +3507,8 @@
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) didMove = true;
       const maxL = Math.max(8, window.innerWidth - wrap.offsetWidth - 8);
       const maxT = Math.max(8, window.innerHeight - wrap.offsetHeight - 8);
-      wrap.style.left = `${Math.max(8, Math.min(origL + dx, maxL))}px`;
-      wrap.style.top  = `${Math.max(8, Math.min(origT + dy, maxT))}px`;
+      wrap.style.setProperty('left', `${Math.max(8, Math.min(origL + dx, maxL))}px`, 'important');
+      wrap.style.setProperty('top', `${Math.max(8, Math.min(origT + dy, maxT))}px`, 'important');
     });
 
     window.addEventListener('mouseup', () => {
@@ -3551,42 +3563,63 @@
   window.addEventListener('beforeunload', emergencyShutdown);
 
   /* =========================================================================
-     BOOTSTRAP GUARDIAN
+     BOOTSTRAP GUARDIAN (RESILIENT TO DOCUMENT-START & SPA RE-MOUNTS)
      ========================================================================= */
   let scrapeIntervalId = null;
+  let uiInitialized = false;
 
   function boot() {
-    if (!document.body) return;
-    mountFloatingWidget();
-    XPlaylist.ensureSidebar();
-    XPlaylist.loadInitial();
-    XPro.buildPanel();
-    const cfg = XPro.getCfg();
-    if (cfg.layout.feedOffset && !cfg.layout.feedDisabled) {
-      XPro.applyFeedOffset(cfg.layout.feedOffset);
-    }
+    if (!document.body && !document.documentElement) return;
 
-    if (!scrapeIntervalId) {
-      scrapeIntervalId = setInterval(() => {
-        if (!document.getElementById('x-controls-wrap')) mountFloatingWidget();
-        if (!document.hidden) XPlaylist.scrapeAvatarsFromDOM();
-      }, 3000);
+    try { mountFloatingWidget(); } catch (e) { console.error('[XTT] mountFloatingWidget:', e); }
+
+    if (document.body && !uiInitialized) {
+      uiInitialized = true;
+      try {
+        XPlaylist.ensureSidebar();
+        XPlaylist.loadInitial();
+      } catch (e) { console.error('[XTT] XPlaylist init:', e); }
+      try {
+        XPro.buildPanel();
+        const cfg = XPro.getCfg();
+        if (cfg.layout.feedOffset && !cfg.layout.feedDisabled) {
+          XPro.applyFeedOffset(cfg.layout.feedOffset);
+        }
+      } catch (e) { console.error('[XTT] XPro init:', e); }
     }
   }
 
+  function startGuardian() {
+    if (scrapeIntervalId) return;
+    scrapeIntervalId = setInterval(() => {
+      if (!document.body) return;
+      if (!uiInitialized) boot();
+      if (!document.getElementById('x-controls-wrap')) {
+        try { mountFloatingWidget(); } catch (_) {}
+      }
+      if (!document.hidden) {
+        try { XPlaylist.scrapeAvatarsFromDOM(); } catch (_) {}
+      }
+    }, 1500);
+  }
+
   window.addEventListener('xtt:kvHydrated', () => {
-    XPro.onHydrate();
+    try { XPro.onHydrate(); } catch (_) {}
     if (document.body) {
-      mountFloatingWidget();
-      XPlaylist.loadInitial();
-      XPlaylist.syncControlsUI();
-      applyWidgetPos(document.getElementById('x-controls-wrap'));
+      try {
+        mountFloatingWidget();
+        XPlaylist.loadInitial();
+        XPlaylist.syncControlsUI();
+        applyWidgetPos(document.getElementById('x-controls-wrap'));
+      } catch (_) {}
     }
   });
 
+  startGuardian();
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot, { once: true });
   } else {
     boot();
   }
+  window.addEventListener('load', boot, { once: true });
 })();
