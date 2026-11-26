@@ -1,8 +1,8 @@
 // ==UserScript Adapted for Pake==
-// @name         Final Tiktok Playlist (TSV Avatar Import Edition) — Pake Edition
+// @name         Final Tiktok Playlist (TSV Avatar Import Edition) — Pake Low-CPU Edition
 // @namespace    belay m.
-// @version      2.9.0-pake
-// @description  TikTok playlist with category grouping, category filter dropdown, verified multi-tier Pake avatar sync, persistent KV + IndexedDB v2 storage, wheel-scroll isolation, avatars-only mode, font controls, draggable controls, and TSV avatar import support.
+// @version      3.0.0-pake
+// @description  TikTok playlist with batch-throttled avatar sync (5/batch, 2 concurrent), viewport-lazy image pool (max 5 concurrent), chunked DOM rendering, IndexedDB-only Base64 storage, 72x72 thumbnail downscaling, draggable controls, and TSV import support.
 // @match        https://www.tiktok.com/*
 // @match        *://*.tiktok.com/*
 // ==/UserScript Adapted for Pake==
@@ -45,6 +45,7 @@
   const __KV_CACHE__ = Object.create(null);
   const __PAKE_MENU_COMMANDS__ = (window.__PAKE_MENU_COMMANDS__ =
     window.__PAKE_MENU_COMMANDS__ || []);
+  const __ACTIVE_XHR_SET__ = new Set();
 
   const __LEGACY_KEYS__ = [
     'tt_playlist_list',
@@ -286,17 +287,36 @@
     let timeoutId = null;
     const abortCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
 
+    const handle = {
+      abort() {
+        if (aborted) return;
+        aborted = true;
+        cleanup();
+        __ACTIVE_XHR_SET__.delete(handle);
+        if (abortCtrl) {
+          try { abortCtrl.abort(); } catch (_) {}
+        }
+        if (typeof details.onabort === 'function') {
+          try { details.onabort({ readyState: 4, status: 0, context: details.context }); } catch (_) {}
+        }
+      }
+    };
+
     const cleanup = () => {
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
         timeoutId = null;
       }
+      __ACTIVE_XHR_SET__.delete(handle);
     };
+
+    __ACTIVE_XHR_SET__.add(handle);
 
     if (typeof details.timeout === 'number' && details.timeout > 0) {
       timeoutId = setTimeout(() => {
         if (aborted) return;
         timedOut = true;
+        cleanup();
         if (abortCtrl) {
           try { abortCtrl.abort(); } catch (_) {}
         }
@@ -381,19 +401,7 @@
     };
 
     run();
-
-    return {
-      abort() {
-        aborted = true;
-        cleanup();
-        if (abortCtrl) {
-          try { abortCtrl.abort(); } catch (_) {}
-        }
-        if (typeof details.onabort === 'function') {
-          try { details.onabort({ readyState: 4, status: 0, context: details.context }); } catch (_) {}
-        }
-      }
-    };
+    return handle;
   }
 
   function GM_download(arg1, arg2) {
@@ -489,13 +497,13 @@
   };
 
   /* =========================================================================
-     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v2.9.0
+     4. TIKTOK PLAYLIST (TSV AVATAR IMPORT EDITION) v3.0.0 — LOW-CPU BATCH ENGINE
      ========================================================================= */
   (function () {
     'use strict';
 
     /***************************************************************************
-     * Storage Keys & Constants
+     * Storage Keys, Throttling & Hardware-Safe Constants
      ***************************************************************************/
     const STORAGE_LIST         = 'tt_playlist_list';
     const STORAGE_SCROLL       = 'tt_playlist_scroll';
@@ -515,9 +523,21 @@
     const DB_VERSION           = 2;
     const DB_STORE             = 'avatars_store_v2';
 
+    // Strict throttling & batch limits for low-end CPUs / Windows network stack
+    const SYNC_BATCH_SIZE      = 5;     // Process 5 avatars per batch
+    const SYNC_CONCURRENCY     = 2;     // Max 2 concurrent API requests per batch
+    const SYNC_BATCH_PAUSE_MS  = 1400;  // Cool-down pause between batches
+    const SYNC_ITEM_STAGGER_MS = 350;   // Stagger inside each batch
+    const MAX_CONCURRENT_IMGS  = 5;     // Max 5 visible <img> network loads at once
+    const REQ_TIMEOUT_MS       = 8000;  // Strict API/HTML timeout
+    const IMG_TIMEOUT_MS       = 6000;  // Strict Image load timeout
+    const MAX_CONSEC_FAILURES  = 6;     // Circuit breaker threshold
+    const CHUNK_SIZE           = 100;   // Incremental DOM render chunk size
+    const THUMB_MAX_PX         = 72;    // Downscale Base64 thumbnails to 72x72 (~1.5KB)
+
     const VIBRANT_PINK   = '#fe2c55';
     const TIKTOK_CYAN    = '#25f4ee';
-    const DARK_BG        = 'rgba(18, 18, 24, 0.97)';
+    const DARK_BG        = 'rgba(18, 18, 24, 0.96)';
     const CARD_BG        = '#1e202e';
     const BTN_BG         = '#161823';
     const BTN_BORDER     = '#3a3b4a';
@@ -542,17 +562,151 @@
     const FONT_SIZE_OPTIONS = [10, 11, 12, 13, 14, 15, 16, 18, 20];
 
     /***************************************************************************
-     * State & Storage Helpers (Backed by Pake KV + Safe JSON Parsing)
+     * Inject Lightweight Stylesheet (replaces 3,000+ inline style/hover objects)
      ***************************************************************************/
-    let playlist         = [];
-    let currentIndex     = -1;
-    let searchQuery      = '';
-    let selectedCategory = String(GM_getValue(STORAGE_SELECTED_CAT, '') || '');
-    let isSyncing        = false;
-    let syncAborted      = false;
+    GM_addStyle(`
+      #tt-playlist-sidebar {
+        --ttpl-fsize: 14px;
+        --ttpl-ffam: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-family: var(--ttpl-ffam);
+      }
+      #tt-playlist-listcontainer::-webkit-scrollbar { width: 6px; }
+      #tt-playlist-listcontainer::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 3px;
+      }
+      .tt-playlist-cat-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 6px 4px 6px;
+        margin-top: 8px;
+        margin-bottom: 4px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 11px;
+        font-weight: 700;
+        color: ${TIKTOK_CYAN};
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        user-select: none;
+      }
+      .tt-playlist-cat-count {
+        font-size: 10px;
+        font-weight: normal;
+        opacity: 0.7;
+        background: rgba(255, 255, 255, 0.08);
+        padding: 1px 5px;
+        border-radius: 10px;
+      }
+      .tt-playlist-row {
+        display: flex;
+        align-items: center;
+        gap: 0.55em;
+        min-width: 0;
+        padding: 0.3em 0.45em;
+        cursor: pointer;
+        background: transparent;
+        color: #ccc;
+        font-weight: normal;
+        border-radius: 6px;
+        text-decoration: none;
+        font-size: var(--ttpl-fsize);
+        font-family: var(--ttpl-ffam);
+        line-height: 1.3;
+        box-sizing: border-box;
+        border-left: 3px solid transparent;
+      }
+      .tt-playlist-row.tt-cols-1 {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+      .tt-playlist-row:not(.tt-active):not(.tt-avatar-only):hover {
+        background: #2c2e3e;
+        color: #fff;
+      }
+      .tt-playlist-row.tt-active:not(.tt-avatar-only) {
+        background: ${VIBRANT_PINK};
+        color: #ffffff;
+        font-weight: 700;
+        border-left-color: ${TIKTOK_CYAN};
+      }
+      .tt-playlist-row.tt-avatar-only {
+        justify-content: center;
+        padding: 3px;
+        border-radius: 50%;
+        border-left: none;
+        gap: 0;
+      }
+      .tt-playlist-avatar-box {
+        width: 2.35em;
+        height: 2.35em;
+        min-width: 2.35em;
+        min-height: 2.35em;
+        border-radius: 50%;
+        background: #2a2a38;
+        flex-shrink: 0;
+        overflow: hidden;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+      }
+      .tt-playlist-row.tt-avatar-only.tt-active .tt-playlist-avatar-box {
+        box-shadow: 0 0 0 3px ${VIBRANT_PINK}, 0 0 8px rgba(254, 44, 85, 0.65);
+      }
+      .tt-playlist-avatar-placeholder {
+        font-size: 0.9em;
+        font-weight: 700;
+        color: #aaa;
+        user-select: none;
+        line-height: 1;
+      }
+      .tt-playlist-avatar-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 50%;
+        display: none;
+      }
+      .tt-playlist-label {
+        min-width: 0;
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #tt-playlist-load-more {
+        text-align: center;
+        padding: 8px;
+        margin: 6px 0;
+        border-radius: 6px;
+        background: ${CARD_BG};
+        border: 1px solid ${BTN_BORDER};
+        color: ${TEXT_PRI};
+        font-size: 11px;
+        cursor: pointer;
+        user-select: none;
+      }
+      #tt-playlist-load-more:hover {
+        border-color: ${TIKTOK_CYAN};
+      }
+    `);
+
+    /***************************************************************************
+     * State & Storage Helpers
+     ***************************************************************************/
+    let playlist           = [];
+    let currentIndex       = -1;
+    let searchQuery        = '';
+    let selectedCategory   = String(GM_getValue(STORAGE_SELECTED_CAT, '') || '');
+    let isSyncing          = false;
+    let syncAborted        = false;
+    let syncCircuitBroken  = false;
     let tikwmCooldownUntil = 0;
+    let isShuttingDown     = false;
 
     const sessionFailedSet = new Set();
+    const activeImagesSet  = new Set();
 
     const parseMaybeJson = (raw, fallback) => {
       if (raw === null || raw === undefined) return fallback;
@@ -612,7 +766,6 @@
     };
     const saveCtrlGeom = (g) => GM_setValue(STORAGE_CTRL_GEOM, g);
 
-    /* Safe DOM creation helper (avoids innerHTML / Trusted Types issues) */
     function el(tag, props, children) {
       const node = document.createElement(tag);
       if (props) {
@@ -629,6 +782,10 @@
         }
       }
       return node;
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     function isUrlExpired(url) {
@@ -742,41 +899,46 @@
     }
 
     /***************************************************************************
-     * Dual Storage v2: Clean Verified Cache (In-Memory + IndexedDB v2 + LocalStorage v2)
-     * Automatically migrates permanent Base64 entries from v1 while dropping stale v1 URLs
+     * Dual Storage v2: IndexedDB Primary (NO Base64 JSON.stringify in localStorage!)
      ***************************************************************************/
-    let avatarCache = (() => {
-      const clean = {};
-      try {
-        const rawV2 = window.localStorage.getItem(STORAGE_AVATARS);
-        if (rawV2) {
-          const parsedV2 = parseMaybeJson(rawV2, {});
-          if (parsedV2 && typeof parsedV2 === 'object') {
-            for (const [k, v] of Object.entries(parsedV2)) {
-              if (isValidAvatarVal(v)) clean[k] = v;
-            }
-          }
-        } else {
-          // One-time migration from v1: preserve ONLY permanent Base64 images (skip expired/broken v1 URLs)
-          const rawV1 = window.localStorage.getItem(STORAGE_AVATARS_V1);
-          if (rawV1) {
-            const parsedV1 = parseMaybeJson(rawV1, {});
-            if (parsedV1 && typeof parsedV1 === 'object') {
-              for (const [k, v] of Object.entries(parsedV1)) {
-                if (typeof v === 'string' && v.startsWith('data:image')) {
-                  clean[k] = v;
-                }
-              }
-            }
-            window.localStorage.removeItem(STORAGE_AVATARS_V1);
-          }
-          window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(clean));
-        }
-      } catch (_) {}
-      return clean;
-    })();
-
+    let avatarCache = {};
     let idbInstance = null;
+
+    // Clean out huge legacy localStorage blob if present; migrate Base64 into IndexedDB on open
+    let pendingV1Base64Migration = null;
+    try {
+      const rawV1 = window.localStorage.getItem(STORAGE_AVATARS_V1);
+      if (rawV1) {
+        const parsedV1 = parseMaybeJson(rawV1, null);
+        if (parsedV1 && typeof parsedV1 === 'object') {
+          pendingV1Base64Migration = {};
+          for (const [k, v] of Object.entries(parsedV1)) {
+            if (typeof v === 'string' && v.startsWith('data:image')) {
+              avatarCache[k] = v;
+              pendingV1Base64Migration[k] = v;
+            }
+          }
+        }
+        window.localStorage.removeItem(STORAGE_AVATARS_V1);
+      }
+      // Also clean up oversized v2 localStorage if earlier version put Base64 inside it
+      const rawV2 = window.localStorage.getItem(STORAGE_AVATARS);
+      if (rawV2) {
+        const parsedV2 = parseMaybeJson(rawV2, null);
+        if (parsedV2 && typeof parsedV2 === 'object') {
+          pendingV1Base64Migration = pendingV1Base64Migration || {};
+          for (const [k, v] of Object.entries(parsedV2)) {
+            if (isValidAvatarVal(v)) {
+              avatarCache[k] = v;
+              pendingV1Base64Migration[k] = v;
+            }
+          }
+        }
+        // Keep localStorage tiny (remove Base64 blobs from localStorage)
+        window.localStorage.removeItem(STORAGE_AVATARS);
+      }
+    } catch (_) {}
+
     function getIDB() {
       if (idbInstance) return Promise.resolve(idbInstance);
       if (typeof indexedDB === 'undefined') return Promise.resolve(null);
@@ -831,40 +993,53 @@
       });
     }
 
+    // Load cached avatars from IndexedDB asynchronously without blocking startup
     getIDB().then((db) => {
       if (!db) return;
       try {
+        if (pendingV1Base64Migration) {
+          const migTx = db.transaction(DB_STORE, 'readwrite');
+          const migStore = migTx.objectStore(DB_STORE);
+          for (const [k, v] of Object.entries(pendingV1Base64Migration)) {
+            if (isValidAvatarVal(v)) migStore.put(v, k);
+          }
+          pendingV1Base64Migration = null;
+        }
+
         const tx = db.transaction(DB_STORE, 'readwrite');
         const store = tx.objectStore(DB_STORE);
         const cursorReq = store.openCursor();
+        let updatedVisible = false;
+
         cursorReq.onsuccess = (e) => {
           const cursor = e.target.result;
           if (cursor) {
             if (isValidAvatarVal(cursor.value)) {
               if (!avatarCache[cursor.key]) {
                 avatarCache[cursor.key] = cursor.value;
-                broadcastAvatarUpdate(cursor.key, cursor.value);
+                updatedVisible = true;
               }
             } else {
               try { cursor.delete(); } catch (_) {}
             }
             cursor.continue();
           } else {
+            if (updatedVisible) {
+              syncRenderedRowAvatars();
+            }
             updateSyncButtonLabel();
           }
         };
       } catch (_) {}
     });
 
-    let avatarSaveTimer = null;
-    function schedulePersistAvatarCache() {
-      clearTimeout(avatarSaveTimer);
-      avatarSaveTimer = setTimeout(() => {
-        try {
-          window.localStorage.setItem(STORAGE_AVATARS, JSON.stringify(avatarCache));
-        } catch (_) {}
+    let syncLabelTimer = null;
+    function scheduleSyncLabelUpdate() {
+      if (syncLabelTimer) return;
+      syncLabelTimer = setTimeout(() => {
+        syncLabelTimer = null;
         updateSyncButtonLabel();
-      }, 300);
+      }, 250);
     }
 
     function cacheAvatar(username, url) {
@@ -873,9 +1048,8 @@
       if (!u || avatarCache[u] === url) return;
       avatarCache[u] = url;
       sessionFailedSet.delete(u);
-
       idbPut(u, url);
-      schedulePersistAvatarCache();
+      scheduleSyncLabelUpdate();
     }
 
     function purgeAvatarEntry(username) {
@@ -883,13 +1057,16 @@
       if (!u) return;
       delete avatarCache[u];
       idbDelete(u);
-      schedulePersistAvatarCache();
+      scheduleSyncLabelUpdate();
     }
 
     function wipeAllAvatarCache() {
       if (isSyncing) syncAborted = true;
-      lazyQueue.length = 0;
-      lazyQueuedSet.clear();
+      syncCircuitBroken = false;
+      lazyFetchQueue.length = 0;
+      lazyFetchQueuedSet.clear();
+      imgLoadQueue.length = 0;
+      imgQueuedSet.clear();
       sessionFailedSet.clear();
       avatarCache = {};
       try {
@@ -902,26 +1079,31 @@
     }
 
     /***************************************************************************
-     * Image Verification & Base64 Conversion Engine
+     * Bounded Image Verification & 72x72 Thumbnail Downscaler
      ***************************************************************************/
     function verifyImageLoads(url) {
-      if (!url || typeof url !== 'string') return Promise.resolve(false);
+      if (isShuttingDown || !url || typeof url !== 'string') return Promise.resolve(false);
       if (url.startsWith('data:image')) return Promise.resolve(true);
       if (isUrlExpired(url)) return Promise.resolve(false);
 
       return new Promise((resolve) => {
         const testImg = new Image();
         testImg.referrerPolicy = 'no-referrer';
+        activeImagesSet.add(testImg);
         let settled = false;
         const done = (ok) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          activeImagesSet.delete(testImg);
           testImg.onload = null;
           testImg.onerror = null;
+          if (!ok) {
+            try { testImg.src = ''; } catch (_) {}
+          }
           resolve(ok);
         };
-        const timer = setTimeout(() => done(false), 7000);
+        const timer = setTimeout(() => done(false), IMG_TIMEOUT_MS);
         testImg.onload = () => done(testImg.naturalWidth > 0);
         testImg.onerror = () => done(false);
         testImg.src = url;
@@ -929,34 +1111,130 @@
     }
 
     async function convertUrlToBase64(url) {
-      if (!url || url.startsWith('data:image')) return url;
+      if (isShuttingDown || !url || url.startsWith('data:image')) return url;
       return new Promise((resolve) => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
-        const timer = setTimeout(() => resolve(url), 6000);
-        img.onload = () => {
+        activeImagesSet.add(img);
+        let settled = false;
+        const finish = (out) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
+          activeImagesSet.delete(img);
+          img.onload = null;
+          img.onerror = null;
+          resolve(out);
+        };
+        const timer = setTimeout(() => finish(url), IMG_TIMEOUT_MS);
+        img.onload = () => {
           try {
+            const w = img.naturalWidth || img.width || THUMB_MAX_PX;
+            const h = img.naturalHeight || img.height || THUMB_MAX_PX;
+            const scale = Math.min(1, THUMB_MAX_PX / Math.max(w, h));
+            const outW = Math.max(1, Math.round(w * scale));
+            const outH = Math.max(1, Math.round(h * scale));
             const canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
+            canvas.width = outW;
+            canvas.height = outH;
             const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
-            resolve(canvas.toDataURL('image/jpeg', 0.8));
+            ctx.drawImage(img, 0, 0, outW, outH);
+            finish(canvas.toDataURL('image/jpeg', 0.72));
           } catch (_) {
-            resolve(url);
+            finish(url);
           }
         };
-        img.onerror = () => {
-          clearTimeout(timer);
-          resolve(url);
-        };
+        img.onerror = () => finish(url);
         img.src = url;
       });
     }
 
     /***************************************************************************
-     * Navigation & DOM Avatar Harvesting
+     * Bounded Concurrent Viewport Image Loader (Max 5 concurrent <img> requests)
+     ***************************************************************************/
+    const imgLoadQueue = [];
+    const imgQueuedSet = new Set();
+    let activeImgLoads = 0;
+
+    function pumpImgLoadQueue() {
+      if (isShuttingDown) return;
+      while (activeImgLoads < MAX_CONCURRENT_IMGS && imgLoadQueue.length > 0) {
+        const task = imgLoadQueue.shift();
+        imgQueuedSet.delete(task.username);
+
+        if (!task.img.isConnected) continue;
+        if (!isValidAvatarVal(task.url)) {
+          enqueueAvatarFetch(task.username);
+          continue;
+        }
+
+        if (task.url.startsWith('data:image')) {
+          // Local Base64: zero network traffic
+          task.img.src = task.url;
+          continue;
+        }
+
+        activeImgLoads++;
+        let finished = false;
+        const complete = (ok) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeoutId);
+          activeImgLoads = Math.max(0, activeImgLoads - 1);
+          if (!ok && task.img.isConnected) {
+            task.img.removeAttribute('src');
+            task.img.style.display = 'none';
+            task.placeholder.style.display = 'flex';
+            if (avatarCache[task.username] && !avatarCache[task.username].startsWith('data:')) {
+              purgeAvatarEntry(task.username);
+              if (task.img.dataset.healed !== '1') {
+                task.img.dataset.healed = '1';
+                enqueueAvatarFetch(task.username);
+              }
+            }
+          }
+          pumpImgLoadQueue();
+        };
+
+        const timeoutId = setTimeout(() => complete(false), IMG_TIMEOUT_MS);
+
+        task.img.onload = () => {
+          if (task.img.naturalWidth > 0) {
+            task.img.style.display = 'block';
+            task.placeholder.style.display = 'none';
+            complete(true);
+          } else {
+            complete(false);
+          }
+        };
+        task.img.onerror = () => complete(false);
+        task.img.src = task.url;
+      }
+    }
+
+    function queueVisibleImgLoad(username, url, imgEl, placeholderEl) {
+      if (!imgEl || !placeholderEl) return;
+      if (!isValidAvatarVal(url)) return;
+
+      if (url.startsWith('data:image')) {
+        imgEl.onload = () => {
+          if (imgEl.naturalWidth > 0) {
+            imgEl.style.display = 'block';
+            placeholderEl.style.display = 'none';
+          }
+        };
+        imgEl.src = url;
+        return;
+      }
+
+      if (imgQueuedSet.has(username)) return;
+      imgQueuedSet.add(username);
+      imgLoadQueue.push({ username, url, img: imgEl, placeholder: placeholderEl });
+      pumpImgLoadQueue();
+    }
+
+    /***************************************************************************
+     * Navigation & Throttled DOM Avatar Harvesting (Excludes our own sidebar!)
      ***************************************************************************/
     function getCurrentUsername() {
       const match = window.location.pathname.match(/^\/@([^/?#]+)/);
@@ -972,8 +1250,7 @@
       if (!entry) return;
       const username = cleanUsername(entry);
       if (!username) return;
-      const targetUrl = `https://www.tiktok.com/@${encodeURIComponent(username)}`;
-      window.location.assign(targetUrl);
+      window.location.assign(`https://www.tiktok.com/@${encodeURIComponent(username)}`);
     }
 
     function isGoodAvatarUrl(url) {
@@ -985,20 +1262,20 @@
     }
 
     function harvestAvatarsFromDOM() {
-      if (!document.body) return;
+      if (isShuttingDown || document.hidden || !document.body) return;
 
       const cur = getCurrentUsername();
       if (cur) {
         const avatarImg = document.querySelector(
-          '[data-e2e="user-avatar"] img, img[class*="ImgAvatar"], .e1iqrkv71, header img[src*="tiktokcdn"]'
+          '[data-e2e="user-avatar"] img, header img[src*="tiktokcdn"], img[class*="ImgAvatar"]'
         );
-        if (avatarImg && isGoodAvatarUrl(avatarImg.src) && !avatarImg.src.startsWith('data:')) {
+        if (avatarImg && !avatarImg.closest('#tt-playlist-sidebar') && isGoodAvatarUrl(avatarImg.src) && !avatarImg.src.startsWith('data:')) {
           const currentCached = avatarCache[cur];
           if (!currentCached || !currentCached.startsWith('data:image')) {
-            cacheAvatar(cur, avatarImg.src);
-            broadcastAvatarUpdate(cur, avatarImg.src);
-
-            convertUrlToBase64(avatarImg.src).then((base64) => {
+            const srcUrl = avatarImg.src;
+            cacheAvatar(cur, srcUrl);
+            broadcastAvatarUpdate(cur, srcUrl);
+            convertUrlToBase64(srcUrl).then((base64) => {
               if (base64 && base64.startsWith('data:image')) {
                 cacheAvatar(cur, base64);
                 broadcastAvatarUpdate(cur, base64);
@@ -1008,9 +1285,13 @@
         }
       }
 
-      const links = document.querySelectorAll('a[href*="/@"]');
-      for (let i = 0; i < links.length; i++) {
+      // Scan page links outside our own sidebar only (bounded to first 40 links)
+      const mainRoot = document.querySelector('main, [id="app"], [class*="DivBodyContainer"]') || document.body;
+      const links = mainRoot.querySelectorAll('a[href*="/@"]');
+      const limit = Math.min(links.length, 40);
+      for (let i = 0; i < limit; i++) {
         const a = links[i];
+        if (a.closest('#tt-playlist-sidebar')) continue;
         try {
           const href = a.getAttribute('href') || '';
           const match = href.match(/\/@([a-zA-Z0-9._]+)/);
@@ -1021,12 +1302,6 @@
               if (img && isGoodAvatarUrl(img.src) && !img.src.startsWith('data:')) {
                 cacheAvatar(u, img.src);
                 broadcastAvatarUpdate(u, img.src);
-                convertUrlToBase64(img.src).then((base64) => {
-                  if (base64 && base64.startsWith('data:image')) {
-                    cacheAvatar(u, base64);
-                    broadcastAvatarUpdate(u, base64);
-                  }
-                });
               }
             }
           }
@@ -1035,19 +1310,19 @@
     }
 
     /***************************************************************************
-     * Multi-Tier Pake Avatar Resolution Engine (All URLs Verified Before Caching)
-     *   Tier 1: TikWM User Info API via Rust proxy_http (with rate-limit cooldown)
-     *   Tier 2: TikTok Embed & Profile HTML via browser fetch()
-     *   Tier 3: TikTok Embed & Profile HTML via proxy_http with Desktop headers
-     *   Tier 4: Unavatar JSON API via proxy_http (bypasses img-src CSP)
+     * Multi-Tier Pake Avatar Resolution Engine (Strict Timeouts + Fast Parsing)
+     *   Tier 1: TikWM User Info API via Rust proxy_http (1KB JSON, no X-Bogus)
+     *   Tier 2: TikTok Creator Embed HTML (/embed/@u) via browser fetch / proxy
+     *   Tier 3: Unavatar JSON API via proxy_http (last-resort fallback)
      ***************************************************************************/
     function proxyGetText(url, headers = {}) {
       return new Promise((resolve) => {
+        if (isShuttingDown) return resolve({ status: 0, text: '', finalUrl: url });
         GM_xmlhttpRequest({
           url,
           method: 'GET',
           headers,
-          timeout: 12000,
+          timeout: REQ_TIMEOUT_MS,
           onload(res) {
             resolve({ status: res.status, text: res.responseText || '', finalUrl: res.finalUrl || url });
           },
@@ -1056,6 +1331,9 @@
           },
           ontimeout() {
             resolve({ status: 0, text: '', finalUrl: url });
+          },
+          onabort() {
+            resolve({ status: 0, text: '', finalUrl: url });
           }
         });
       });
@@ -1063,12 +1341,13 @@
 
     function proxyGetJson(url, headers = {}) {
       return new Promise((resolve) => {
+        if (isShuttingDown) return resolve({ status: 0, data: null });
         GM_xmlhttpRequest({
           url,
           method: 'GET',
           headers: { Accept: 'application/json', ...headers },
           responseType: 'json',
-          timeout: 12000,
+          timeout: REQ_TIMEOUT_MS,
           onload(res) {
             if (res.response && typeof res.response === 'object') {
               resolve({ status: res.status, data: res.response });
@@ -1080,6 +1359,9 @@
             resolve({ status: 0, data: null });
           },
           ontimeout() {
+            resolve({ status: 0, data: null });
+          },
+          onabort() {
             resolve({ status: 0, data: null });
           }
         });
@@ -1096,6 +1378,22 @@
         .trim();
     }
 
+    // Fast indexOf-based <script id="..."> extractor (zero regex backtracking CPU spike)
+    function extractScriptJsonById(html, scriptId) {
+      const marker = `id="${scriptId}"`;
+      const idx = html.indexOf(marker);
+      if (idx === -1) return null;
+      const openEnd = html.indexOf('>', idx);
+      if (openEnd === -1) return null;
+      const closeStart = html.indexOf('</script>', openEnd);
+      if (closeStart === -1) return null;
+      try {
+        return JSON.parse(html.slice(openEnd + 1, closeStart));
+      } catch (_) {
+        return null;
+      }
+    }
+
     function extractAvatarCandidatesFromHtml(html, username) {
       const candidates = [];
       const push = (raw) => {
@@ -1105,48 +1403,38 @@
 
       if (!html || typeof html !== 'string') return candidates;
 
-      // 1. __UNIVERSAL_DATA_FOR_REHYDRATION__
-      try {
-        const jsonMatch = html.match(/<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i);
-        if (jsonMatch && jsonMatch[1]) {
-          const data = JSON.parse(jsonMatch[1]);
-          const scope = data?.['__DEFAULT_SCOPE__'];
-          const user =
-            scope?.['webapp.user-detail']?.userInfo?.user ||
-            scope?.['webapp.user-profile']?.userInfo?.user ||
-            null;
-          push(user?.avatarThumb);
-          push(user?.avatarMedium);
-          push(user?.avatarLarger);
+      const rehydration = extractScriptJsonById(html, '__UNIVERSAL_DATA_FOR_REHYDRATION__');
+      if (rehydration) {
+        const scope = rehydration['__DEFAULT_SCOPE__'];
+        const user =
+          scope?.['webapp.user-detail']?.userInfo?.user ||
+          scope?.['webapp.user-profile']?.userInfo?.user ||
+          null;
+        push(user?.avatarThumb);
+        push(user?.avatarMedium);
+        push(user?.avatarLarger);
+      }
+
+      const sigi = extractScriptJsonById(html, 'SIGI_STATE');
+      if (sigi) {
+        const usersMap = sigi?.UserModule?.users || {};
+        const user = usersMap[username] || Object.values(usersMap)[0];
+        push(user?.avatarThumb);
+        push(user?.avatarMedium);
+        push(user?.avatarLarger);
+      }
+
+      if (candidates.length === 0) {
+        for (const key of ['"avatarThumb":"', '"avatarMedium":"', '"avatarLarger":"']) {
+          const kIdx = html.indexOf(key);
+          if (kIdx !== -1) {
+            const valStart = kIdx + key.length;
+            const valEnd = html.indexOf('"', valStart);
+            if (valEnd !== -1 && valEnd - valStart < 1024) {
+              push(html.slice(valStart, valEnd));
+            }
+          }
         }
-      } catch (_) {}
-
-      // 2. SIGI_STATE
-      try {
-        const sigiMatch = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/i);
-        if (sigiMatch && sigiMatch[1]) {
-          const sigi = JSON.parse(sigiMatch[1]);
-          const usersMap = sigi?.UserModule?.users || {};
-          const user = usersMap[username] || Object.values(usersMap)[0];
-          push(user?.avatarThumb);
-          push(user?.avatarMedium);
-          push(user?.avatarLarger);
-        }
-      } catch (_) {}
-
-      // 3. Inline JSON / Embed HTML Regex
-      const patterns = [
-        /"avatarThumb"\s*:\s*"([^"]+)"/i,
-        /"avatarMedium"\s*:\s*"([^"]+)"/i,
-        /"avatarLarger"\s*:\s*"([^"]+)"/i,
-        /<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"/i,
-        /<img[^>]+src="([^"]+tiktokcdn[^"]+)"[^>]*>/i,
-        /<meta\s+[^>]*?(?:property|name)=["']og:image["'][^>]*?content=["']([^"']+)["']/i
-      ];
-
-      for (const rx of patterns) {
-        const m = html.match(rx);
-        if (m && m[1]) push(m[1]);
       }
 
       return candidates;
@@ -1154,22 +1442,38 @@
 
     async function pickFirstLoadable(urls) {
       for (const candidate of urls) {
+        if (isShuttingDown) return null;
         if (!isGoodAvatarUrl(candidate)) continue;
         if (await verifyImageLoads(candidate)) return candidate;
       }
       return null;
     }
 
+    async function fetchWithTimeout(url, opts = {}) {
+      if (isShuttingDown) return null;
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = setTimeout(() => {
+        if (ctrl) try { ctrl.abort(); } catch (_) {}
+      }, REQ_TIMEOUT_MS);
+      try {
+        return await fetch(url, { ...opts, signal: ctrl ? ctrl.signal : undefined });
+      } catch (_) {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     async function fetchAvatarForUsername(username) {
       const u = cleanUsername(username);
-      if (!u) return null;
+      if (!u || isShuttingDown) return null;
 
       let sawRateLimit = false;
       const ua =
         navigator.userAgent ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0';
 
-      // Tier 1: TikWM Public User Info API via proxy_http
+      // Tier 1: TikWM Public User Info API via proxy_http (tiny JSON, low CPU)
       if (__PAKE_INVOKE__ && Date.now() >= tikwmCooldownUntil) {
         const tikwm = await proxyGetJson(
           `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent('@' + u)}`,
@@ -1194,48 +1498,41 @@
         }
       }
 
-      // Tier 2: Same-origin TikTok Creator Embed & Profile HTML via browser fetch()
-      for (const targetUrl of [
-        `https://www.tiktok.com/embed/@${encodeURIComponent(u)}`,
-        `https://www.tiktok.com/@${encodeURIComponent(u)}`
-      ]) {
-        try {
-          const pageRes = await fetch(targetUrl, { credentials: 'include' });
-          if (pageRes.status === 429) {
-            sawRateLimit = true;
-            continue;
-          }
-          if (pageRes.ok) {
-            const html = await pageRes.text();
-            const candidates = extractAvatarCandidatesFromHtml(html, u);
-            const okUrl = await pickFirstLoadable(candidates);
-            if (okUrl) return { url: okUrl, source: 'tiktok-fetch' };
-          }
-        } catch (_) {}
+      if (isShuttingDown) return null;
+
+      // Tier 2: Lightweight TikTok Creator Embed HTML (/embed/@u) via browser fetch, then proxy_http
+      const embedUrl = `https://www.tiktok.com/embed/@${encodeURIComponent(u)}`;
+      const embedRes = await fetchWithTimeout(embedUrl, { credentials: 'include' });
+      if (embedRes) {
+        if (embedRes.status === 429) {
+          sawRateLimit = true;
+        } else if (embedRes.ok) {
+          try {
+            const html = await embedRes.text();
+            const okUrl = await pickFirstLoadable(extractAvatarCandidatesFromHtml(html, u));
+            if (okUrl) return { url: okUrl, source: 'tiktok-embed-fetch' };
+          } catch (_) {}
+        }
       }
 
-      // Tier 3: TikTok Embed & Profile HTML via Pake proxy_http with full Desktop headers
+      if (isShuttingDown) return null;
+
       if (__PAKE_INVOKE__) {
-        const browserHeaders = {
+        const proxiedEmbed = await proxyGetText(embedUrl, {
           'User-Agent': ua,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9'
-        };
-        for (const targetUrl of [
-          `https://www.tiktok.com/embed/@${encodeURIComponent(u)}`,
-          `https://www.tiktok.com/@${encodeURIComponent(u)}`
-        ]) {
-          const proxied = await proxyGetText(targetUrl, browserHeaders);
-          if (proxied.status === 429) {
-            sawRateLimit = true;
-            continue;
-          }
-          const candidates = extractAvatarCandidatesFromHtml(proxied.text, u);
-          const okUrl = await pickFirstLoadable(candidates);
-          if (okUrl) return { url: okUrl, source: 'tiktok-proxy' };
+        });
+        if (proxiedEmbed.status === 429) {
+          sawRateLimit = true;
+        } else if (proxiedEmbed.text) {
+          const okUrl = await pickFirstLoadable(extractAvatarCandidatesFromHtml(proxiedEmbed.text, u));
+          if (okUrl) return { url: okUrl, source: 'tiktok-embed-proxy' };
         }
 
-        // Tier 4: Unavatar JSON API via proxy_http (last-resort fallback; avoids img-src CSP)
+        if (isShuttingDown) return null;
+
+        // Tier 3: Unavatar JSON API via proxy_http (last-resort fallback; avoids img-src CSP)
         const unavatar = await proxyGetJson(
           `https://unavatar.io/tiktok/${encodeURIComponent(u)}?json&fallback=false`,
           { 'User-Agent': ua }
@@ -1249,47 +1546,53 @@
       return sawRateLimit ? { rateLimited: true } : { notFound: true };
     }
 
-    function applyAvatarToDOM(url, imgEl, placeholderEl) {
-      if (!imgEl || !placeholderEl) return;
-      if (isValidAvatarVal(url)) {
-        // Keep img hidden until onload succeeds so broken-image icon never flickers
-        imgEl.style.display = 'none';
-        placeholderEl.style.display = 'flex';
-        imgEl.src = url;
-      } else {
-        imgEl.removeAttribute('src');
-        imgEl.style.display = 'none';
-        placeholderEl.style.display = 'flex';
-      }
-    }
-
     function broadcastAvatarUpdate(username, url) {
       const u = cleanUsername(username);
+      const listContainer = document.getElementById('tt-playlist-listcontainer');
+      if (!listContainer || !isValidAvatarVal(url)) return;
       const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(u) : u;
-      document.querySelectorAll(`.tt-playlist-row[data-username="${escaped}"]`).forEach((row) => {
+      listContainer.querySelectorAll(`.tt-playlist-row[data-username="${escaped}"]`).forEach((row) => {
         const img = row.querySelector('.tt-playlist-avatar-img');
         const placeholder = row.querySelector('.tt-playlist-avatar-placeholder');
-        applyAvatarToDOM(url, img, placeholder);
+        if (!img || !placeholder) return;
+        queueVisibleImgLoad(u, url, img, placeholder);
+      });
+    }
+
+    function syncRenderedRowAvatars() {
+      const listContainer = document.getElementById('tt-playlist-listcontainer');
+      if (!listContainer) return;
+      listContainer.querySelectorAll('.tt-playlist-row').forEach((row) => {
+        const u = row.dataset.username;
+        const cached = avatarCache[u];
+        if (!isValidAvatarVal(cached)) return;
+        const img = row.querySelector('.tt-playlist-avatar-img');
+        const placeholder = row.querySelector('.tt-playlist-avatar-placeholder');
+        if (img && placeholder && !img.getAttribute('src')) {
+          queueVisibleImgLoad(u, cached, img, placeholder);
+        }
       });
     }
 
     /***************************************************************************
-     * Paced Lazy Queue (for visible rows) + Batch Sync Process
+     * Throttled Batch Sync Engine (5 per batch, max 2 concurrent, circuit breaker)
      ***************************************************************************/
-    const lazyQueue = [];
-    const lazyQueuedSet = new Set();
+    const lazyFetchQueue = [];
+    const lazyFetchQueuedSet = new Set();
     let lazyWorkerRunning = false;
 
     async function resolveAndStoreAvatar(u) {
       const res = await fetchAvatarForUsername(u);
+      if (isShuttingDown) return 'ABORT';
       if (res?.rateLimited) return 'RATE_LIMITED';
 
       if (res?.url && isGoodAvatarUrl(res.url)) {
         cacheAvatar(u, res.url);
         broadcastAvatarUpdate(u, res.url);
 
+        // Downscale to 72x72 Base64 asynchronously in IndexedDB when CORS allows
         convertUrlToBase64(res.url).then((base64Url) => {
-          if (base64Url && base64Url.startsWith('data:image')) {
+          if (!isShuttingDown && base64Url && base64Url.startsWith('data:image')) {
             cacheAvatar(u, base64Url);
             broadcastAvatarUpdate(u, base64Url);
           }
@@ -1302,26 +1605,35 @@
     }
 
     async function runLazyQueue() {
-      if (lazyWorkerRunning) return;
+      if (lazyWorkerRunning || isShuttingDown) return;
       lazyWorkerRunning = true;
 
-      while (lazyQueue.length > 0) {
+      let consecFailures = 0;
+      while (lazyFetchQueue.length > 0 && !isShuttingDown) {
         if (isSyncing) {
-          lazyQueue.length = 0;
-          lazyQueuedSet.clear();
+          lazyFetchQueue.length = 0;
+          lazyFetchQueuedSet.clear();
           break;
         }
-        const u = lazyQueue.shift();
-        lazyQueuedSet.delete(u);
+        const u = lazyFetchQueue.shift();
+        lazyFetchQueuedSet.delete(u);
         if (!u || isValidAvatarVal(avatarCache[u]) || sessionFailedSet.has(u)) continue;
 
         const status = await resolveAndStoreAvatar(u);
+        if (status === 'ABORT') break;
         if (status === 'RATE_LIMITED') {
-          lazyQueue.unshift(u);
-          lazyQueuedSet.add(u);
-          await new Promise((r) => setTimeout(r, 3500));
+          consecFailures++;
+          if (consecFailures >= MAX_CONSEC_FAILURES) break;
+          lazyFetchQueue.unshift(u);
+          lazyFetchQueuedSet.add(u);
+          await sleep(3500);
+        } else if (status === 'OK') {
+          consecFailures = 0;
+          await sleep(1000);
         } else {
-          await new Promise((r) => setTimeout(r, 1100));
+          consecFailures++;
+          if (consecFailures >= MAX_CONSEC_FAILURES) break;
+          await sleep(800);
         }
       }
 
@@ -1330,14 +1642,16 @@
 
     function enqueueAvatarFetch(username) {
       const u = cleanUsername(username);
-      if (!u || isSyncing) return;
-      if (isValidAvatarVal(avatarCache[u]) || sessionFailedSet.has(u) || lazyQueuedSet.has(u)) return;
-      lazyQueuedSet.add(u);
-      lazyQueue.push(u);
+      if (!u || isSyncing || isShuttingDown) return;
+      if (isValidAvatarVal(avatarCache[u]) || sessionFailedSet.has(u) || lazyFetchQueuedSet.has(u)) return;
+      if (lazyFetchQueue.length >= 25) return; // Cap lazy queue to visible viewport items
+      lazyFetchQueuedSet.add(u);
+      lazyFetchQueue.push(u);
       runLazyQueue();
     }
 
     async function startAvatarBatchSync(isManualClick = true) {
+      if (isShuttingDown) return;
       if (isSyncing) {
         if (isManualClick) syncAborted = true;
         return;
@@ -1345,6 +1659,7 @@
 
       if (isManualClick) {
         sessionFailedSet.clear();
+        syncCircuitBroken = false;
       }
 
       const usernames = Array.from(new Set(playlist.map(cleanUsername).filter(Boolean)));
@@ -1364,35 +1679,61 @@
 
       isSyncing = true;
       syncAborted = false;
-      lazyQueue.length = 0;
-      lazyQueuedSet.clear();
+      syncCircuitBroken = false;
+      lazyFetchQueue.length = 0;
+      lazyFetchQueuedSet.clear();
       updateSyncButtonLabel();
 
-      const queue = [...missing];
       let completedCount = usernames.length - missing.length;
       const totalCount = usernames.length;
+      let consecFailures = 0;
 
-      while (queue.length > 0 && !syncAborted) {
-        const u = queue.shift();
-        if (!u || isValidAvatarVal(avatarCache[u])) continue;
+      // Process strictly in batches of SYNC_BATCH_SIZE (5) with SYNC_CONCURRENCY (2)
+      for (let i = 0; i < missing.length && !syncAborted && !isShuttingDown; i += SYNC_BATCH_SIZE) {
+        const batch = missing.slice(i, i + SYNC_BATCH_SIZE);
+        let batchIdx = 0;
 
-        const status = await resolveAndStoreAvatar(u);
-        if (status === 'RATE_LIMITED') {
-          queue.unshift(u);
-          await new Promise((r) => setTimeout(r, 4000));
-          continue;
+        const runBatchWorker = async () => {
+          while (!syncAborted && !isShuttingDown) {
+            const myIdx = batchIdx++;
+            if (myIdx >= batch.length) break;
+            const u = batch[myIdx];
+            if (!u || isValidAvatarVal(avatarCache[u])) continue;
+
+            if (myIdx > 0) await sleep(SYNC_ITEM_STAGGER_MS);
+            if (syncAborted || isShuttingDown) break;
+
+            const status = await resolveAndStoreAvatar(u);
+            if (status === 'OK') {
+              consecFailures = 0;
+              completedCount++;
+            } else if (status === 'RATE_LIMITED' || status === 'MISS') {
+              consecFailures++;
+              if (consecFailures >= MAX_CONSEC_FAILURES) {
+                syncCircuitBroken = true;
+                syncAborted = true;
+                break;
+              }
+            }
+            updateSyncButtonLabel(completedCount, totalCount);
+          }
+        };
+
+        const workers = Array.from(
+          { length: Math.min(SYNC_CONCURRENCY, batch.length) },
+          () => runBatchWorker()
+        );
+        await Promise.all(workers);
+
+        if (syncAborted || isShuttingDown) break;
+        if (i + SYNC_BATCH_SIZE < missing.length) {
+          await sleep(SYNC_BATCH_PAUSE_MS);
         }
-        if (status === 'OK') {
-          completedCount++;
-        }
-
-        updateSyncButtonLabel(completedCount, totalCount);
-        await new Promise((r) => setTimeout(r, 1100));
       }
 
       isSyncing = false;
       syncAborted = false;
-      updateSyncButtonLabel();
+      updateSyncButtonLabel(completedCount, totalCount);
     }
 
     function getAvatarStats() {
@@ -1412,37 +1753,57 @@
 
       if (isSyncing) {
         btn.textContent = `⏳ ${cur}/${tot}`;
-        btn.title = 'Fetching & verifying avatars... Click to pause.';
+        btn.title = `Batch syncing (${SYNC_BATCH_SIZE}/batch, ${SYNC_CONCURRENCY} concurrent). Click to pause.`;
         btn.style.background = 'rgba(254, 44, 85, 0.35)';
         btn.style.borderColor = VIBRANT_PINK;
+      } else if (syncCircuitBroken && cur < tot) {
+        btn.textContent = `⚠ Retry (${cur}/${tot})`;
+        btn.title = 'Paused after consecutive network/rate-limit errors. Click to resume.';
+        btn.style.background = 'rgba(255, 165, 0, 0.25)';
+        btn.style.borderColor = '#ffa500';
       } else {
         btn.textContent = `⚡ Sync (${cur}/${tot})`;
-        btn.title = `Sync missing avatars (${cur} of ${tot} verified). Click to fetch.`;
+        btn.title = `Batch-sync missing avatars (${cur} of ${tot} cached). Click to start.`;
         btn.style.background = cur === tot && tot > 0 ? 'rgba(37, 244, 238, 0.2)' : CARD_BG;
         btn.style.borderColor = cur === tot && tot > 0 ? TIKTOK_CYAN : BTN_BORDER;
       }
     }
 
     /***************************************************************************
-     * IntersectionObserver (Lazy-Loader via Paced Queue)
+     * IntersectionObserver (Viewport Lazy Loader for Both Cached & Missing Rows)
      ***************************************************************************/
-    let avatarObserver = null;
-    function getAvatarObserver(rootContainer) {
-      if (!avatarObserver) {
-        avatarObserver = new IntersectionObserver((entries) => {
+    let rowObserver = null;
+    function getRowObserver(rootContainer) {
+      if (!rowObserver) {
+        rowObserver = new IntersectionObserver((entries) => {
           entries.forEach((entry) => {
-            if (entry.isIntersecting) {
-              const box = entry.target;
-              avatarObserver.unobserve(box);
-              const u = box.dataset.username;
-              if (u && !isValidAvatarVal(avatarCache[u])) {
-                enqueueAvatarFetch(u);
+            if (!entry.isIntersecting) return;
+            const target = entry.target;
+
+            if (target.id === 'tt-playlist-load-more') {
+              renderNextChunk();
+              return;
+            }
+
+            rowObserver.unobserve(target);
+            const u = target.dataset.username;
+            if (!u) return;
+
+            const cached = avatarCache[u];
+            if (isValidAvatarVal(cached)) {
+              const row = target.closest('.tt-playlist-row');
+              const img = row?.querySelector('.tt-playlist-avatar-img');
+              const placeholder = row?.querySelector('.tt-playlist-avatar-placeholder');
+              if (img && placeholder && !img.getAttribute('src')) {
+                queueVisibleImgLoad(u, cached, img, placeholder);
               }
+            } else {
+              enqueueAvatarFetch(u);
             }
           });
-        }, { root: rootContainer, rootMargin: '120px' });
+        }, { root: rootContainer, rootMargin: '80px' });
       }
-      return avatarObserver;
+      return rowObserver;
     }
 
     /***************************************************************************
@@ -1507,10 +1868,15 @@
         whiteSpace:     'nowrap',
         lineHeight:     '1.2',
         fontWeight:     '500',
-        transition:     'background 0.15s, border-color 0.15s',
         touchAction:    'manipulation'
       });
       return btn;
+    }
+
+    function applyTypographyVars(sidebar) {
+      if (!sidebar) return;
+      sidebar.style.setProperty('--ttpl-fsize', `${loadFSize()}px`);
+      sidebar.style.setProperty('--ttpl-ffam', loadFFam());
     }
 
     function createSidebar() {
@@ -1523,30 +1889,29 @@
       const sidebar = document.createElement('div');
       sidebar.id = 'tt-playlist-sidebar';
       Object.assign(sidebar.style, {
-        position:       'fixed',
-        top:            geom.top,
-        left:           geom.left || 'auto',
-        right:          geom.right,
-        width:          geom.width,
-        height:         geom.height,
-        minWidth:       '200px',
-        minHeight:      '200px',
-        background:     DARK_BG,
-        color:          TEXT_PRI,
-        padding:        '8px 10px',
-        borderRadius:   '10px',
-        zIndex:         '2147483645',
-        display:        loadVis() ? 'flex' : 'none',
-        flexDirection:  'column',
-        boxShadow:      '0 10px 32px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.08)',
-        backdropFilter: 'blur(16px)',
-        fontSize:       '14px',
-        lineHeight:     '1.45',
-        resize:         'both',
-        overflow:       'hidden',
-        fontFamily:     loadFFam(),
-        boxSizing:      'border-box'
+        position:      'fixed',
+        top:           geom.top,
+        left:          geom.left || 'auto',
+        right:         geom.right,
+        width:         geom.width,
+        height:        geom.height,
+        minWidth:      '200px',
+        minHeight:     '200px',
+        background:    DARK_BG,
+        color:         TEXT_PRI,
+        padding:       '8px 10px',
+        borderRadius:  '10px',
+        zIndex:        '2147483645',
+        display:       loadVis() ? 'flex' : 'none',
+        flexDirection: 'column',
+        boxShadow:     '0 10px 32px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.08)',
+        fontSize:      '14px',
+        lineHeight:    '1.45',
+        resize:        'both',
+        overflow:      'hidden',
+        boxSizing:     'border-box'
       });
+      applyTypographyVars(sidebar);
 
       ['wheel', 'DOMMouseScroll', 'mousewheel', 'touchmove'].forEach((evt) => {
         sidebar.addEventListener(evt, (e) => e.stopPropagation(), { passive: true });
@@ -1660,8 +2025,10 @@
       clearBtn.title = 'Clear playlist (hold Ctrl to also wipe cached avatars)';
       clearBtn.addEventListener('click', (e) => {
         if (isSyncing) syncAborted = true;
-        lazyQueue.length = 0;
-        lazyQueuedSet.clear();
+        lazyFetchQueue.length = 0;
+        lazyFetchQueuedSet.clear();
+        imgLoadQueue.length = 0;
+        imgQueuedSet.clear();
         GM_deleteValue(STORAGE_LIST);
         GM_deleteValue(STORAGE_SCROLL);
         GM_deleteValue(STORAGE_LAST_INDEX);
@@ -1695,9 +2062,13 @@
           padding: '4px 6px', fontSize: '11px', outline: 'none'
         }
       });
+      let searchDebounce = null;
       searchInput.addEventListener('input', (e) => {
-        searchQuery = e.target.value.toLowerCase().trim();
-        renderList();
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+          searchQuery = e.target.value.toLowerCase().trim();
+          renderList();
+        }, 120);
       });
 
       const clearSearchBtn = mkBtn('✕', 'transparent');
@@ -1749,7 +2120,7 @@
       });
       sizeSelect.addEventListener('change', () => {
         saveFSize(parseInt(sizeSelect.value, 10));
-        renderList();
+        applyTypographyVars(sidebar);
       });
 
       const lblFont = el('span', { textContent: 'Font:', style: { color: TEXT_SEC, fontSize: '10px', whiteSpace: 'nowrap' } });
@@ -1765,19 +2136,19 @@
       });
       famSelect.addEventListener('change', () => {
         saveFFam(famSelect.value);
-        sidebar.style.fontFamily = famSelect.value;
-        renderList();
+        applyTypographyVars(sidebar);
       });
 
       fontRow.append(lblSz, sizeSelect, lblFont, famSelect);
       sidebar.appendChild(fontRow);
 
-      // --- List Viewport ---
+      // --- List Viewport (Single Delegated Click Listener) ---
       const listContainer = el('div', {
         id: 'tt-playlist-listcontainer',
         style: { flex: '1', overflowY: 'auto', overflowX: 'hidden', paddingRight: '2px' }
       });
       listContainer.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+      listContainer.addEventListener('click', onListClick);
       sidebar.appendChild(listContainer);
 
       // Header drag logic
@@ -1819,9 +2190,176 @@
       updateSyncButtonLabel();
     }
 
+    function onListClick(e) {
+      if (e.target.id === 'tt-playlist-load-more') {
+        renderNextChunk();
+        return;
+      }
+
+      const row = e.target.closest('.tt-playlist-row');
+      if (!row) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const originalIdx = parseInt(row.dataset.index, 10);
+      const u = row.dataset.username;
+      if (!u) return;
+
+      saveIdx(originalIdx);
+
+      const listContainer = document.getElementById('tt-playlist-listcontainer');
+      if (listContainer) {
+        listContainer.querySelectorAll('.tt-playlist-row.tt-active').forEach((r) => {
+          r.classList.remove('tt-active');
+          const span = r.querySelector('.tt-playlist-label');
+          if (span && span.dataset.rawText) {
+            span.textContent = span.dataset.rawText;
+          }
+        });
+      }
+
+      row.classList.add('tt-active');
+      const activeSpan = row.querySelector('.tt-playlist-label');
+      if (activeSpan && activeSpan.dataset.rawText) {
+        activeSpan.textContent = `▶ ${activeSpan.dataset.rawText}`;
+      }
+
+      navigateTo(u);
+    }
+
     /***************************************************************************
-     * Render List
+     * Chunked Incremental List Renderer (Handles 1,000+ entries smoothly)
      ***************************************************************************/
+    let renderFlatItems = [];
+    let renderedCount = 0;
+    let lastRenderedCategory = null;
+    let lastCategoryGrid = null;
+    let categoryCountsMap = new Map();
+
+    function createCategoryGrid(cols, isAvatarOnly) {
+      const container = document.createElement('div');
+      if (isAvatarOnly) {
+        const effectiveCols = cols === 1 ? 4 : cols;
+        Object.assign(container.style, {
+          display: 'grid',
+          gridTemplateColumns: `repeat(${effectiveCols}, minmax(0, 1fr))`,
+          gap: '8px 4px', width: '100%', alignContent: 'start',
+          justifyItems: 'center', marginBottom: '6px'
+        });
+      } else if (cols > 1) {
+        Object.assign(container.style, {
+          display: 'grid',
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+          gap: '4px', width: '100%', alignContent: 'start', marginBottom: '6px'
+        });
+      } else {
+        Object.assign(container.style, {
+          display: 'flex', flexDirection: 'column', gap: '3px',
+          width: '100%', marginBottom: '6px'
+        });
+      }
+      return container;
+    }
+
+    function renderNextChunk() {
+      const listContainer = document.getElementById('tt-playlist-listcontainer');
+      if (!listContainer || renderedCount >= renderFlatItems.length) return;
+
+      const oldSentinel = document.getElementById('tt-playlist-load-more');
+      if (oldSentinel) {
+        if (rowObserver) rowObserver.unobserve(oldSentinel);
+        oldSentinel.remove();
+      }
+
+      const cols         = loadCols();
+      const isAvatarOnly = loadAvatarOnly();
+      const currentUser  = getCurrentUsername();
+      const observer     = getRowObserver(listContainer);
+
+      const end = Math.min(renderedCount + CHUNK_SIZE, renderFlatItems.length);
+      const frag = document.createDocumentFragment();
+      const observeTargets = [];
+
+      for (let i = renderedCount; i < end; i++) {
+        const { username: u, category: cat, originalIdx } = renderFlatItems[i];
+
+        if (cat !== lastRenderedCategory || !lastCategoryGrid) {
+          lastRenderedCategory = cat;
+          if (!selectedCategory && (categoryCountsMap.size > 1 || cat !== 'General')) {
+            const catHeader = el('div', { className: 'tt-playlist-cat-header' }, [
+              el('span', { textContent: `📁 ${cat}` }),
+              el('span', { className: 'tt-playlist-cat-count', textContent: String(categoryCountsMap.get(cat) || 0) })
+            ]);
+            frag.appendChild(catHeader);
+          }
+          lastCategoryGrid = createCategoryGrid(cols, isAvatarOnly);
+          frag.appendChild(lastCategoryGrid);
+        }
+
+        const isMatch = currentUser && (currentUser === u);
+        const isLast  = originalIdx === currentIndex;
+        const active  = isMatch || isLast;
+
+        const row = document.createElement('a');
+        row.href = `https://www.tiktok.com/@${encodeURIComponent(u)}`;
+        row.title = `@${u} (${originalIdx + 1})`;
+        row.className =
+          'tt-playlist-row' +
+          (active ? ' tt-active' : '') +
+          (isAvatarOnly ? ' tt-avatar-only' : '') +
+          (!isAvatarOnly && cols === 1 ? ' tt-cols-1' : '');
+        row.dataset.index = String(originalIdx);
+        row.dataset.username = u;
+
+        const avatarBox = document.createElement('div');
+        avatarBox.className = 'tt-playlist-avatar-box';
+        avatarBox.dataset.username = u;
+
+        const placeholder = el('span', {
+          className: 'tt-playlist-avatar-placeholder',
+          textContent: (u[0] || 'T').toUpperCase()
+        });
+
+        const img = document.createElement('img');
+        img.className = 'tt-playlist-avatar-img';
+        img.referrerPolicy = 'no-referrer';
+
+        avatarBox.append(placeholder, img);
+        row.appendChild(avatarBox);
+
+        if (!isAvatarOnly) {
+          const rawText = `${originalIdx + 1}. @${u}`;
+          const textSpan = el('span', {
+            className: 'tt-playlist-label',
+            textContent: active ? `▶ ${rawText}` : rawText
+          });
+          textSpan.dataset.rawText = rawText;
+          row.appendChild(textSpan);
+        }
+
+        lastCategoryGrid.appendChild(row);
+        observeTargets.push(avatarBox);
+      }
+
+      renderedCount = end;
+
+      if (renderedCount < renderFlatItems.length) {
+        const remaining = renderFlatItems.length - renderedCount;
+        const sentinel = el('div', {
+          id: 'tt-playlist-load-more',
+          textContent: `Load next ${Math.min(CHUNK_SIZE, remaining)} (${remaining} remaining)`
+        });
+        frag.appendChild(sentinel);
+        observeTargets.push(sentinel);
+      }
+
+      listContainer.appendChild(frag);
+      for (let i = 0; i < observeTargets.length; i++) {
+        observer.observe(observeTargets[i]);
+      }
+    }
+
     function renderList() {
       createSidebar();
       const sidebar       = document.getElementById('tt-playlist-sidebar');
@@ -1829,10 +2367,19 @@
       if (!listContainer || !sidebar) return;
 
       refreshCategoryDropdown();
-
+      applyTypographyVars(sidebar);
       sidebar.style.display = loadVis() ? 'flex' : 'none';
-      sidebar.style.fontFamily = loadFFam();
+
+      if (rowObserver) rowObserver.disconnect();
+      imgLoadQueue.length = 0;
+      imgQueuedSet.clear();
       listContainer.replaceChildren();
+
+      renderFlatItems = [];
+      renderedCount = 0;
+      lastRenderedCategory = null;
+      lastCategoryGrid = null;
+      categoryCountsMap = new Map();
 
       if (!playlist || playlist.length === 0) {
         const emptyBox = el('div', {
@@ -1847,13 +2394,6 @@
         return;
       }
 
-      const cols         = loadCols();
-      const fSize        = loadFSize();
-      const fFam         = loadFFam();
-      const isAvatarOnly = loadAvatarOnly();
-      const currentUser  = getCurrentUsername();
-      const observer     = getAvatarObserver(listContainer);
-
       let displayItems = playlist.map((item, idx) => ({
         username: cleanUsername(item),
         category: item.category || 'General',
@@ -1863,7 +2403,6 @@
       if (selectedCategory) {
         displayItems = displayItems.filter((item) => item.category === selectedCategory);
       }
-
       if (searchQuery) {
         displayItems = displayItems.filter((item) =>
           item.username.includes(searchQuery) || item.category.toLowerCase().includes(searchQuery)
@@ -1878,303 +2417,43 @@
         return;
       }
 
+      // Group items by category in memory first
       const grouped = new Map();
-      displayItems.forEach((item) => {
-        const cat = item.category || 'General';
+      for (let i = 0; i < displayItems.length; i++) {
+        const it = displayItems[i];
+        const cat = it.category || 'General';
         if (!grouped.has(cat)) grouped.set(cat, []);
-        grouped.get(cat).push(item);
+        grouped.get(cat).push(it);
+      }
+      grouped.forEach((arr, cat) => {
+        categoryCountsMap.set(cat, arr.length);
+        for (let i = 0; i < arr.length; i++) renderFlatItems.push(arr[i]);
       });
 
-      grouped.forEach((itemsInCat, categoryName) => {
-        if (!selectedCategory && (grouped.size > 1 || categoryName !== 'General')) {
-          const catHeader = el('div', {
-            style: {
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '6px 6px 4px 6px', marginTop: '8px', marginBottom: '4px',
-              borderBottom: '1px solid rgba(255,255,255,0.08)', fontSize: '11px',
-              fontWeight: '700', color: TIKTOK_CYAN, textTransform: 'uppercase',
-              letterSpacing: '0.4px', userSelect: 'none'
-            }
-          }, [
-            el('span', { textContent: `📁 ${categoryName}` }),
-            el('span', {
-              textContent: String(itemsInCat.length),
-              style: {
-                fontSize: '10px', fontWeight: 'normal', opacity: '0.7',
-                background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '10px'
-              }
-            })
-          ]);
-          listContainer.appendChild(catHeader);
-        }
-
-        const container = document.createElement('div');
-        if (isAvatarOnly) {
-          const effectiveCols = cols === 1 ? 4 : cols;
-          Object.assign(container.style, {
-            display: 'grid',
-            gridTemplateColumns: `repeat(${effectiveCols}, minmax(0, 1fr))`,
-            gap: '8px 4px', width: '100%', alignContent: 'start',
-            justifyItems: 'center', marginBottom: '6px'
-          });
-        } else if (cols > 1) {
-          Object.assign(container.style, {
-            display: 'grid',
-            gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-            gap: '4px', width: '100%', alignContent: 'start', marginBottom: '6px'
-          });
-        } else {
-          Object.assign(container.style, {
-            display: 'flex', flexDirection: 'column', gap: '3px',
-            width: '100%', marginBottom: '6px'
-          });
-        }
-        listContainer.appendChild(container);
-
-        itemsInCat.forEach(({ username: u, originalIdx }) => {
-          try {
-            const isMatch = currentUser && (currentUser === u);
-            const isLast  = originalIdx === currentIndex;
-            const active  = isMatch || isLast;
-
-            const row = document.createElement('a');
-            row.href = `https://www.tiktok.com/@${encodeURIComponent(u)}`;
-            row.title = `@${u} (${originalIdx + 1})`;
-            row.className = 'tt-playlist-row' + (active ? ' tt-active' : '');
-            row.dataset.index = String(originalIdx);
-            row.dataset.username = u;
-
-            if (isAvatarOnly) {
-              Object.assign(row.style, {
-                display:        'flex',
-                alignItems:     'center',
-                justifyContent: 'center',
-                padding:        '3px',
-                borderRadius:   '50%',
-                cursor:         'pointer',
-                background:     'transparent',
-                textDecoration: 'none',
-                fontSize:       `${fSize}px`,
-                fontFamily:     fFam,
-                boxSizing:      'border-box'
-              });
-            } else {
-              Object.assign(row.style, {
-                display:        'flex',
-                alignItems:     'center',
-                gap:            '0.55em',
-                minWidth:       '0',
-                padding:        '0.3em 0.45em',
-                borderBottom:   cols === 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
-                cursor:         'pointer',
-                background:     active ? VIBRANT_PINK : 'transparent',
-                color:          active ? '#ffffff' : '#ccc',
-                fontWeight:     active ? '700' : 'normal',
-                borderRadius:   '6px',
-                textDecoration: 'none',
-                transition:     'background 0.12s',
-                fontSize:       `${fSize}px`,
-                fontFamily:     fFam,
-                lineHeight:     '1.3',
-                boxSizing:      'border-box',
-                borderLeft:     active ? `3px solid ${TIKTOK_CYAN}` : '3px solid transparent'
-              });
-            }
-
-            row.onmouseenter = () => {
-              if (originalIdx !== currentIndex && !isAvatarOnly) {
-                row.style.background = '#2c2e3e';
-                row.style.color = '#fff';
-              }
-            };
-            row.onmouseleave = () => {
-              if (originalIdx !== currentIndex && !isAvatarOnly) {
-                row.style.background = 'transparent';
-                row.style.color = '#ccc';
-              }
-            };
-
-            row.addEventListener('click', (e) => {
-              e.preventDefault();
-              e.stopPropagation();
-
-              saveIdx(originalIdx);
-
-              document.querySelectorAll('.tt-playlist-row').forEach((r) => {
-                r.classList.remove('tt-active');
-                if (isAvatarOnly) {
-                  const b = r.querySelector('.tt-playlist-avatar-box');
-                  if (b) b.style.boxShadow = '0 1px 3px rgba(0,0,0,0.4)';
-                } else {
-                  r.style.background = 'transparent';
-                  r.style.color = '#ccc';
-                  r.style.fontWeight = 'normal';
-                  r.style.borderLeft = '3px solid transparent';
-                  const span = r.querySelector('.tt-playlist-label');
-                  if (span && span.dataset.rawText) {
-                    span.textContent = span.dataset.rawText;
-                  }
-                }
-              });
-
-              row.classList.add('tt-active');
-              const box = row.querySelector('.tt-playlist-avatar-box');
-
-              if (isAvatarOnly) {
-                if (box) box.style.boxShadow = `0 0 0 3px ${VIBRANT_PINK}, 0 0 10px rgba(254, 44, 85, 0.7)`;
-              } else {
-                row.style.background = VIBRANT_PINK;
-                row.style.color = '#ffffff';
-                row.style.fontWeight = '700';
-                row.style.borderLeft = `3px solid ${TIKTOK_CYAN}`;
-                const activeSpan = row.querySelector('.tt-playlist-label');
-                if (activeSpan && activeSpan.dataset.rawText) {
-                  activeSpan.textContent = `▶ ${activeSpan.dataset.rawText}`;
-                }
-              }
-
-              navigateTo(u);
-            });
-
-            // Avatar Box
-            const avatarBox = document.createElement('div');
-            avatarBox.className = 'tt-playlist-avatar-box';
-            avatarBox.dataset.username = u;
-            Object.assign(avatarBox.style, {
-              width:          '2.35em',
-              height:         '2.35em',
-              minWidth:       '2.35em',
-              minHeight:      '2.35em',
-              borderRadius:   '50%',
-              background:     '#2a2a38',
-              flexShrink:     '0',
-              overflow:       'hidden',
-              position:       'relative',
-              display:        'flex',
-              alignItems:     'center',
-              justifyContent: 'center',
-              boxShadow:      active && isAvatarOnly
-                ? `0 0 0 3px ${VIBRANT_PINK}, 0 0 10px rgba(254, 44, 85, 0.7)`
-                : '0 1px 3px rgba(0,0,0,0.4)',
-              transition:     'box-shadow 0.15s ease'
-            });
-
-            const placeholder = el('span', {
-              className: 'tt-playlist-avatar-placeholder',
-              textContent: (u[0] || 'T').toUpperCase(),
-              style: {
-                fontSize: '0.9em', fontWeight: '700', color: '#aaa',
-                userSelect: 'none', lineHeight: '1'
-              }
-            });
-
-            const img = document.createElement('img');
-            img.className = 'tt-playlist-avatar-img';
-            img.referrerPolicy = 'no-referrer';
-            img.loading = 'lazy';
-            Object.assign(img.style, {
-              width:        '100%',
-              height:       '100%',
-              objectFit:    'cover',
-              borderRadius: '50%',
-              display:      'none'
-            });
-
-            // Show only after onload confirms a valid decoded image (zero broken-image flicker)
-            img.onload = () => {
-              if (img.naturalWidth > 0) {
-                img.style.display = 'block';
-                placeholder.style.display = 'none';
-              } else {
-                img.style.display = 'none';
-                placeholder.style.display = 'flex';
-              }
-            };
-
-            img.onerror = () => {
-              img.style.display = 'none';
-              placeholder.style.display = 'flex';
-              if (avatarCache[u] && !avatarCache[u].startsWith('data:')) {
-                purgeAvatarEntry(u);
-                if (img.dataset.healed !== '1') {
-                  img.dataset.healed = '1';
-                  enqueueAvatarFetch(u);
-                }
-              }
-            };
-
-            avatarBox.append(placeholder, img);
-
-            const cached = avatarCache[u];
-            if (isValidAvatarVal(cached)) {
-              img.src = cached;
-            } else {
-              observer.observe(avatarBox);
-            }
-
-            row.appendChild(avatarBox);
-
-            if (!isAvatarOnly) {
-              const rawText = `${originalIdx + 1}. @${u}`;
-              const textSpan = el('span', {
-                className: 'tt-playlist-label',
-                textContent: active ? `▶ ${rawText}` : rawText,
-                style: {
-                  minWidth: '0', flex: '1', whiteSpace: 'nowrap',
-                  overflow: 'hidden', textOverflow: 'ellipsis'
-                }
-              });
-              textSpan.dataset.rawText = rawText;
-              row.appendChild(textSpan);
-            }
-
-            container.appendChild(row);
-          } catch (err) {
-            console.warn('[TikTok Playlist] Skipping row error', err);
-          }
-        });
-      });
+      renderNextChunk();
 
       const savedScroll = parseInt(GM_getValue(STORAGE_SCROLL, 0), 10);
-      if (Number.isFinite(savedScroll) && savedScroll > 0) {
+      if (Number.isFinite(savedScroll) && savedScroll > 0 && savedScroll < listContainer.scrollHeight) {
         listContainer.scrollTop = savedScroll;
       }
 
+      let scrollSaveTimer = null;
       listContainer.onscroll = () => {
-        GM_setValue(STORAGE_SCROLL, listContainer.scrollTop || 0);
+        clearTimeout(scrollSaveTimer);
+        scrollSaveTimer = setTimeout(() => {
+          GM_setValue(STORAGE_SCROLL, listContainer.scrollTop || 0);
+        }, 250);
       };
 
-      harvestAvatarsFromDOM();
       updateSyncButtonLabel();
     }
 
     /***************************************************************************
-     * Floating Draggable Controls & Upload
+     * Floating Draggable Controls & File Upload (Throttled TSV Processing)
      ***************************************************************************/
-    async function processTsvAvatarQueue(items) {
-      for (const item of items) {
-        if (avatarCache[item.username] && avatarCache[item.username].startsWith('data:image')) {
-          continue;
-        }
-        if (item.avatarUrl && isGoodAvatarUrl(item.avatarUrl)) {
-          const ok = await verifyImageLoads(item.avatarUrl);
-          if (ok) {
-            cacheAvatar(item.username, item.avatarUrl);
-            broadcastAvatarUpdate(item.username, item.avatarUrl);
-            const base64 = await convertUrlToBase64(item.avatarUrl);
-            if (base64 && base64.startsWith('data:image')) {
-              cacheAvatar(item.username, base64);
-              broadcastAvatarUpdate(item.username, base64);
-            }
-          }
-        }
-        await new Promise((r) => setTimeout(r, 120));
-      }
-    }
-
     function handleFile(file) {
       const reader = new FileReader();
-      reader.onload = async (e) => {
+      reader.onload = (e) => {
         const rawText = e.target?.result || '';
         const parsedData = parsePlaylistText(rawText);
 
@@ -2184,7 +2463,33 @@
           mainCategory: item.mainCategory || 'General'
         }));
 
+        // Store TSV avatar URLs directly in IndexedDB (lazy-loaded on viewport scroll, never burst-fetched)
+        getIDB().then((db) => {
+          const validEntries = parsedData.filter(
+            (item) => item.avatarUrl && isGoodAvatarUrl(item.avatarUrl) && !isValidAvatarVal(avatarCache[item.username])
+          );
+          if (!validEntries.length) return;
+
+          if (db) {
+            try {
+              const tx = db.transaction(DB_STORE, 'readwrite');
+              const store = tx.objectStore(DB_STORE);
+              for (const item of validEntries) {
+                avatarCache[item.username] = item.avatarUrl;
+                store.put(item.avatarUrl, item.username);
+              }
+            } catch (_) {}
+          } else {
+            for (const item of validEntries) {
+              avatarCache[item.username] = item.avatarUrl;
+            }
+          }
+          syncRenderedRowAvatars();
+          updateSyncButtonLabel();
+        });
+
         sessionFailedSet.clear();
+        syncCircuitBroken = false;
         currentIndex = -1;
         selectedCategory = '';
         GM_deleteValue(STORAGE_SELECTED_CAT);
@@ -2198,14 +2503,6 @@
         updateToggleBtn();
         renderList();
         updateSyncButtonLabel();
-
-        if (parsedData.some((x) => x.avatarUrl)) {
-          await processTsvAvatarQueue(parsedData);
-        }
-
-        if (playlist.some((item) => !isValidAvatarVal(avatarCache[item.username]))) {
-          startAvatarBatchSync(false);
-        }
       };
       reader.readAsText(file);
     }
@@ -2428,6 +2725,51 @@
     });
 
     /***************************************************************************
+     * Clean Shutdown / Unload Abort (Prevents Stuck OS Network Queues)
+     ***************************************************************************/
+    let domObserver = null;
+    let harvestTimer = null;
+
+    function emergencyCleanup() {
+      isShuttingDown = true;
+      syncAborted = true;
+      isSyncing = false;
+      lazyFetchQueue.length = 0;
+      lazyFetchQueuedSet.clear();
+      imgLoadQueue.length = 0;
+      imgQueuedSet.clear();
+
+      if (harvestTimer) {
+        clearTimeout(harvestTimer);
+        harvestTimer = null;
+      }
+      if (domObserver) {
+        try { domObserver.disconnect(); } catch (_) {}
+      }
+      if (rowObserver) {
+        try { rowObserver.disconnect(); } catch (_) {}
+      }
+
+      // Abort every in-flight proxy_http / fetch request and image load immediately
+      __ACTIVE_XHR_SET__.forEach((xhr) => {
+        try { xhr.abort(); } catch (_) {}
+      });
+      __ACTIVE_XHR_SET__.clear();
+
+      activeImagesSet.forEach((img) => {
+        try {
+          img.onload = null;
+          img.onerror = null;
+          img.src = '';
+        } catch (_) {}
+      });
+      activeImagesSet.clear();
+    }
+
+    window.addEventListener('pagehide', emergencyCleanup);
+    window.addEventListener('beforeunload', emergencyCleanup);
+
+    /***************************************************************************
      * Initialization, Hydrate Sync & Throttled SPA Harvester
      ***************************************************************************/
     function syncControlsState() {
@@ -2456,7 +2798,7 @@
         sidebar.style.right = g.right;
         sidebar.style.width = g.width;
         sidebar.style.height = g.height;
-        sidebar.style.fontFamily = loadFFam();
+        applyTypographyVars(sidebar);
       }
       applyCtrlGeom(document.getElementById('tt-playlist-controls'));
       updateToggleBtn();
@@ -2470,9 +2812,9 @@
     }
 
     let lastPath = window.location.pathname;
-    let harvestTimer = null;
 
     function scheduleDomWork() {
+      if (isShuttingDown) return;
       if (!document.getElementById('tt-playlist-controls')) initControls();
       if (!document.getElementById('tt-playlist-sidebar')) {
         createSidebar();
@@ -2482,16 +2824,18 @@
       if (window.location.pathname !== lastPath) {
         lastPath = window.location.pathname;
         setTimeout(() => {
-          harvestAvatarsFromDOM();
-          renderList();
+          if (!isShuttingDown) {
+            harvestAvatarsFromDOM();
+            renderList();
+          }
         }, 400);
       }
 
-      if (!harvestTimer) {
+      if (!harvestTimer && !document.hidden) {
         harvestTimer = setTimeout(() => {
           harvestTimer = null;
           harvestAvatarsFromDOM();
-        }, 1000);
+        }, 3000);
       }
     }
 
@@ -2514,19 +2858,24 @@
     window.addEventListener('popstate', scheduleDomWork);
 
     function bootstrapUI() {
-      if (!document.body) return;
+      if (!document.body || isShuttingDown) return;
 
       hydrateStateFromKV();
       createSidebar();
       renderList();
       initControls();
 
-      const domObserver = new MutationObserver((mutations) => {
+      domObserver = new MutationObserver((mutations) => {
+        if (isShuttingDown) return;
+        const sidebarEl = document.getElementById('tt-playlist-sidebar');
+        const ctrlEl = document.getElementById('tt-playlist-controls');
+
         for (const m of mutations) {
-          if (m.addedNodes && m.addedNodes.length > 0) {
-            scheduleDomWork();
-            break;
-          }
+          if (!m.addedNodes || m.addedNodes.length === 0) continue;
+          if (sidebarEl && sidebarEl.contains(m.target)) continue;
+          if (ctrlEl && ctrlEl.contains(m.target)) continue;
+          scheduleDomWork();
+          break;
         }
       });
       domObserver.observe(document.body, { childList: true, subtree: true });
@@ -2534,7 +2883,7 @@
 
     window.addEventListener('ttpl:kvHydrated', () => {
       hydrateStateFromKV();
-      if (document.body) {
+      if (document.body && !isShuttingDown) {
         createSidebar();
         initControls();
         syncControlsState();
@@ -2550,8 +2899,10 @@
 
     window.addEventListener('load', () => {
       setTimeout(() => {
-        initControls();
-        renderList();
+        if (!isShuttingDown) {
+          initControls();
+          renderList();
+        }
       }, 1000);
     });
   })();
