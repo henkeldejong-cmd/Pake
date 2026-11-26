@@ -1,6 +1,9 @@
-// --- Safe Pake Shim for X (Iframe Guard + proxy_http + GM_* Persistence) ---
-if (window.self !== window.top) {
-  throw new Error("[Pake] Skipping X plugins inside iframe");
+// --- Safe Pake Shim for X (Iframe + Login-Page Guard + proxy_http + GM_* Persistence) ---
+if (
+  window.self !== window.top ||
+  /^\/(i\/flow|login|logout|account|signup)/i.test(location.pathname)
+) {
+  throw new Error("[Pake] Skipping X plugins on iframe or login page");
 }
 
 const __PAKE_INVOKE__ =
