@@ -1,0 +1,41 @@
+name: Build My Custom Sofascore App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "sofascore-plugins/**"
+      - ".github/workflows/build-sofascore.yml"
+  workflow_dispatch:
+
+jobs:
+  build-sofascore-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Check JS syntax
+        shell: bash
+        run: node --check sofascore-plugins/sofascore-adblock.js
+
+      - name: Setup Pake environment
+        uses: ./.github/actions/setup-env
+        with:
+          mode: build
+
+      - name: Build Pake CLI
+        run: pnpm run cli:build
+
+      - name: Build Custom Sofascore MSI
+        run: node dist/cli.js https://www.sofascore.com --name "Sofascore" --identifier com.pake.sofascore.custom --width 1280 --height 760 --maximize --new-window --no-restore-last-url --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.0.0" --inject ./sofascore-plugins/sofascore-adblock.js
+
+      - name: Upload Sofascore MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-sofascore-msi
+          path: "*.msi"
+          if-no-files-found: error
